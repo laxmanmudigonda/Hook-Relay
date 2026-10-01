@@ -45,8 +45,11 @@ class DeliverySummary(BaseModel):
     endpoint_id: UUID
     status: str
     attempt_count: int
+    current_attempt_count: int
+    replay_count: int
     delivered_at: datetime | None
     next_attempt_at: datetime | None
+    last_replayed_at: datetime | None
     created_at: datetime
 
 

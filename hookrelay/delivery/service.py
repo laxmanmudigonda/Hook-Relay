@@ -64,13 +64,14 @@ async def attempt_delivery(
     completed_at = datetime.now(UTC)
     latency_ms = max(0, round((time.perf_counter() - started_clock) * 1000))
     delivery.attempt_count += 1
+    delivery.current_attempt_count += 1
     if response_status is not None and 200 <= response_status < 300:
         delivery.status = DeliveryStatus.DELIVERED.value
         delivery.delivered_at = completed_at
         delivery.next_attempt_at = None
     else:
         decision = policy.decide(
-            attempt_number=delivery.attempt_count,
+            attempt_number=delivery.current_attempt_count,
             response_status=response_status,
             transport_error=transport_error,
             retry_after_seconds=retry_after_seconds,
@@ -79,7 +80,11 @@ async def attempt_delivery(
             delivery.status = DeliveryStatus.RETRY_SCHEDULED.value
             delivery.next_attempt_at = completed_at + timedelta(seconds=decision.delay_seconds)
         else:
-            delivery.status = DeliveryStatus.FAILED.value
+            delivery.status = (
+                DeliveryStatus.DEAD_LETTERED.value
+                if decision.reason == "attempts_exhausted"
+                else DeliveryStatus.FAILED.value
+            )
             delivery.next_attempt_at = None
 
     attempt = DeliveryAttempt(

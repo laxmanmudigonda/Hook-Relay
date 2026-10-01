@@ -66,7 +66,11 @@ async def process_message(
             )
             await acknowledge(redis, message_id)
             return
-        if delivery.status in {DeliveryStatus.DELIVERED.value, DeliveryStatus.FAILED.value}:
+        if delivery.status in {
+            DeliveryStatus.DELIVERED.value,
+            DeliveryStatus.FAILED.value,
+            DeliveryStatus.DEAD_LETTERED.value,
+        }:
             logger.info(
                 "acknowledging duplicate message for terminal delivery",
                 extra={
@@ -113,6 +117,7 @@ async def process_message(
                 "message_id": message_id,
                 "status": delivery.status,
                 "attempt_count": delivery.attempt_count,
+                "current_attempt_count": delivery.current_attempt_count,
                 "next_attempt_at": (
                     delivery.next_attempt_at.isoformat() if delivery.next_attempt_at else None
                 ),

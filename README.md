@@ -4,9 +4,9 @@ HookRelay is a production-oriented learning project for reliable webhook deliver
 system will accept events, persist them, and deliver them to registered HTTP endpoints while making
 failures, retries, duplicate delivery, and recovery explicit.
 
-This repository currently contains the **Phase 3 retry engine**. It accepts and persists events,
-publishes delivery work to Redis Streams, and retries transient receiver failures with bounded
-exponential backoff and full jitter.
+This repository currently contains **Phase 4 dead-letter handling and manual replay**. It accepts
+and persists events, retries transient receiver failures, exposes exhausted deliveries for
+inspection, and can replay them without deleting their attempt history.
 
 ## Current architecture
 
@@ -86,6 +86,15 @@ curl http://localhost:8000/api/v1/deliveries/DELIVERY_ID
 docker compose logs -f worker
 ```
 
+After a retryable failure exhausts its attempt budget, replay it once the receiver is healthy:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/deliveries/DELIVERY_ID/replay
+```
+
+Replay returns HTTP 202, resets the current retry-cycle count, and queues the same delivery ID.
+The endpoint must still be enabled.
+
 Stop the services with `docker compose down`. Add `--volumes` only when you intentionally want to
 delete the local PostgreSQL and Redis data volumes.
 
@@ -134,7 +143,7 @@ docker compose exec redis redis-cli XPENDING hookrelay:deliveries hookrelay-work
 All application settings use the `HOOKRELAY_` prefix. See `.env.example`. The checked-in values are
 local-development defaults only; real credentials and `.env` files must not be committed.
 
-## Phase 3 behavior and decisions
+## Phase 4 behavior and decisions
 
 - PostgreSQL 17 is pinned by major version for reproducibility while retaining patch updates.
 - Liveness and readiness are separate because a failed dependency should remove an instance from
@@ -165,11 +174,20 @@ local-development defaults only; real credentials and `.env` files must not be c
   while terminal deliveries are not sent again.
 - Duplicate stream entries are expected. A worker acknowledges entries for terminal deliveries
   without issuing another HTTP request.
+- A retryable failure that exhausts its configured attempts becomes `dead_lettered`. A
+  non-retryable response such as HTTP 400 becomes `failed` immediately and is not treated as retry
+  exhaustion.
+- Manual replay reuses the existing delivery. `attempt_count` remains the lifetime count and
+  attempt numbers remain monotonic; `current_attempt_count` is reset for a fresh retry budget.
+  `replay_count` and `last_replayed_at` make the action visible.
+- Replay is restricted to dead-lettered deliveries. Replaying a pending, failed, or delivered
+  delivery returns HTTP 409, as does replay to a disabled endpoint.
 
 The architectural rationale is recorded in
 [ADR 001](docs/adr/001-postgresql-as-system-of-record.md) and
 [ADR 002](docs/adr/002-redis-streams.md), and
-[ADR 003](docs/adr/003-retry-policy-and-scheduling.md).
+[ADR 003](docs/adr/003-retry-policy-and-scheduling.md), and
+[ADR 004](docs/adr/004-dead-letters-and-replay.md).
 
 ### Retry configuration
 
@@ -187,8 +205,14 @@ http://mock-receiver:8001/webhooks/flaky?key=phase3-demo&failures=2
 ```
 
 The resulting delivery finishes as `delivered` with three attempt records. An always-failing
-endpoint finishes as `failed` after the configured maximum. Phase 4 will distinguish exhausted
-work as dead-lettered and add manual replay.
+endpoint finishes as `dead_lettered` after the configured maximum.
+
+### Dead-letter and replay demonstration
+
+Register a flaky endpoint with `failures=5` while the default maximum is five, then submit an
+event. The delivery becomes `dead_lettered` with attempts 1 through 5. Calling its replay endpoint
+starts a fresh retry cycle; because the mock receiver now recovers, lifetime attempt 6 succeeds.
+All six attempt records remain available through the delivery and attempts APIs.
 
 ### Current delivery semantics and limitations
 
@@ -202,14 +226,18 @@ This phase does not yet claim complete at-least-once delivery:
   fails after the database commit, the original stream entry remains unacknowledged and repeating
   the idempotent event request can republish it. The transactional outbox in Phase 6 and pending
   message recovery in Phase 7 close the automatic-recovery gaps.
+- The replay state commit and Redis publication are also not atomic yet. If replay publication
+  fails, the delivery remains `pending`; repeating the original idempotent event request can
+  republish it. Phase 6 will move this publication through the transactional outbox.
 - A receiver can process a webhook before a worker crashes, so future recovery may deliver it again.
   Exactly-once webhook delivery is not claimed.
 
 Private-network receiver URLs are intentionally allowed for the local mock receiver. This is not a
 production-safe SSRF policy; URL resolution and network egress controls belong to Phase 9.
 
-## Next: Phase 4 (not implemented)
+## Next: Phase 5 (not implemented)
 
-Phase 4 will add an explicit dead-letter state and manual replay while preserving all attempt
-history. Signing, authentication, and the transactional outbox remain later phases.
+Phase 5 will add HMAC webhook signatures, timestamp tolerance, receiver-side verification, and
+tests proving modified payloads or incorrect secrets do not verify. Authentication and the
+transactional outbox remain later phases.
 

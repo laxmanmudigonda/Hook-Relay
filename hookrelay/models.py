@@ -29,6 +29,7 @@ class DeliveryStatus(StrEnum):
     RETRY_SCHEDULED = "retry_scheduled"
     DELIVERED = "delivered"
     FAILED = "failed"
+    DEAD_LETTERED = "dead_lettered"
 
 
 class Tenant(Base):
@@ -82,7 +83,12 @@ class Delivery(Base):
         UniqueConstraint("event_id", "endpoint_id", name="uq_deliveries_event_endpoint"),
         CheckConstraint("attempt_count >= 0", name="ck_deliveries_attempt_count_nonnegative"),
         CheckConstraint(
-            "status IN ('pending', 'retry_scheduled', 'delivered', 'failed')",
+            "current_attempt_count >= 0",
+            name="ck_deliveries_current_attempt_count_nonnegative",
+        ),
+        CheckConstraint("replay_count >= 0", name="ck_deliveries_replay_count_nonnegative"),
+        CheckConstraint(
+            "status IN ('pending', 'retry_scheduled', 'delivered', 'failed', 'dead_lettered')",
             name="ck_deliveries_status",
         ),
         Index("ix_deliveries_retry_due", "status", "next_attempt_at"),
@@ -100,8 +106,11 @@ class Delivery(Base):
         String(32), default=DeliveryStatus.PENDING.value, server_default="pending"
     )
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    current_attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    replay_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_replayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
