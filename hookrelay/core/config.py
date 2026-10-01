@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     redis_consumer_group: str = "hookrelay-workers"
     worker_block_ms: int = Field(default=5000, ge=100, le=60000)
     worker_batch_size: int = Field(default=10, ge=1, le=100)
+    max_delivery_attempts: int = Field(default=5, ge=1, le=100)
+    retry_base_delay_seconds: float = Field(default=1.0, gt=0, le=3600)
+    retry_max_delay_seconds: float = Field(default=60.0, gt=0, le=86400)
+    retry_schedule_name: str = "hookrelay:retries"
+    retry_scheduler_interval_ms: int = Field(default=500, ge=100, le=60000)
+    retry_promotion_batch_size: int = Field(default=100, ge=1, le=1000)
 
 
 @lru_cache

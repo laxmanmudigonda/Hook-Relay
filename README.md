@@ -4,9 +4,9 @@ HookRelay is a production-oriented learning project for reliable webhook deliver
 system will accept events, persist them, and deliver them to registered HTTP endpoints while making
 failures, retries, duplicate delivery, and recovery explicit.
 
-This repository currently contains the **Phase 2 asynchronous delivery pipeline**. It accepts and
-persists events, publishes delivery work to Redis Streams, and records worker attempts without
-waiting for customer HTTP endpoints in the ingestion request.
+This repository currently contains the **Phase 3 retry engine**. It accepts and persists events,
+publishes delivery work to Redis Streams, and retries transient receiver failures with bounded
+exponential backoff and full jitter.
 
 ## Current architecture
 
@@ -18,10 +18,12 @@ FastAPI (endpoints, events, deliveries)
     |
     +----> PostgreSQL (system of record)
     |
-    +----> Redis Stream
+    +----> Redis Stream <---- due retries from Redis sorted set
               |
               v
         Delivery worker ----> HTTP POST ----> Mock receiver
+              |
+              +---- transient failure ----> delayed retry sorted set
 ```
 
 - `/health` is a liveness check. It proves the API process can serve requests and deliberately does
@@ -76,8 +78,8 @@ curl -X POST http://localhost:8000/api/v1/events \
   -d '{"event_type":"payment.completed","payload":{"payment_id":"pay_123","amount":2499}}'
 ```
 
-The event response may show `pending`. Inspect a delivery through its returned ID or follow worker
-activity:
+The event response may show `pending` or `retry_scheduled`. Inspect a delivery through its returned
+ID or follow worker activity:
 
 ```bash
 curl http://localhost:8000/api/v1/deliveries/DELIVERY_ID
@@ -132,7 +134,7 @@ docker compose exec redis redis-cli XPENDING hookrelay:deliveries hookrelay-work
 All application settings use the `HOOKRELAY_` prefix. See `.env.example`. The checked-in values are
 local-development defaults only; real credentials and `.env` files must not be committed.
 
-## Phase 2 behavior and decisions
+## Phase 3 behavior and decisions
 
 - PostgreSQL 17 is pinned by major version for reproducibility while retaining patch updates.
 - Liveness and readiness are separate because a failed dependency should remove an instance from
@@ -147,25 +149,48 @@ local-development defaults only; real credentials and `.env` files must not be c
 - Tenant deletion cascades through owned data, event deletion cascades through delivery history,
   and endpoint deletion is restricted once delivery history refers to it. No deletion routes are
   exposed in Phase 1.
-- Any 2xx response is successful. Other HTTP responses, connection failures, and timeouts produce a
-  failed delivery with a bounded response preview or error message.
+- Any 2xx response is successful. Timeouts, network failures, HTTP 408, 425, 429, and 5xx responses
+  are retryable. Other 4xx responses fail immediately because repeating an invalid request usually
+  cannot make it valid.
+- Retry delays use capped exponential backoff with full jitter. A valid `Retry-After` header on a
+  retryable response acts as a minimum delay, bounded by the configured maximum so a receiver
+  cannot postpone work indefinitely.
+- PostgreSQL is authoritative for status, attempt count, history, and `next_attempt_at`. A Redis
+  sorted set is the efficient due-time schedule. A Lua script atomically removes due IDs from that
+  set and appends them to the delivery stream.
 - The API commits the event and pending deliveries before publishing their IDs. The worker commits
   attempt state before acknowledging Redis entries.
-- Repeating an idempotent request republishes only still-pending deliveries. This provides an
-  explicit recovery action when Redis publication failed, while terminal deliveries are not sent
-  again.
+- Repeating an idempotent request republishes incomplete pending or retry-scheduled deliveries.
+  This provides an explicit recovery action when Redis publication or retry scheduling failed,
+  while terminal deliveries are not sent again.
 - Duplicate stream entries are expected. A worker acknowledges entries for terminal deliveries
   without issuing another HTTP request.
 
 The architectural rationale is recorded in
 [ADR 001](docs/adr/001-postgresql-as-system-of-record.md) and
-[ADR 002](docs/adr/002-redis-streams.md).
+[ADR 002](docs/adr/002-redis-streams.md), and
+[ADR 003](docs/adr/003-retry-policy-and-scheduling.md).
 
-### Current delivery semantics
+### Retry configuration
 
-Phase 2 makes exactly one asynchronous attempt. Response bodies are capped in attempt history, and
-redirects are not followed. Failed HTTP outcomes are acknowledged after their failure record is
-committed; Phase 3 will decide when and how to retry them.
+The defaults are five total attempts, a one-second base delay, a 60-second delay cap, and a
+500-millisecond scheduler interval. Configure them with
+`HOOKRELAY_MAX_DELIVERY_ATTEMPTS`, `HOOKRELAY_RETRY_BASE_DELAY_SECONDS`,
+`HOOKRELAY_RETRY_MAX_DELAY_SECONDS`, and `HOOKRELAY_RETRY_SCHEDULER_INTERVAL_MS`.
+Response bodies remain bounded in attempt history, and redirects are not followed.
+
+To demonstrate two failures followed by success, register this endpoint before submitting an
+event (use a unique `key` for each demonstration):
+
+```text
+http://mock-receiver:8001/webhooks/flaky?key=phase3-demo&failures=2
+```
+
+The resulting delivery finishes as `delivered` with three attempt records. An always-failing
+endpoint finishes as `failed` after the configured maximum. Phase 4 will distinguish exhausted
+work as dead-lettered and add manual replay.
+
+### Current delivery semantics and limitations
 
 This phase does not yet claim complete at-least-once delivery:
 
@@ -173,16 +198,18 @@ This phase does not yet claim complete at-least-once delivery:
   idempotent client retry republishes it, while Phase 6 will close the gap with an outbox.
 - A worker crash after reading a message can leave it in Redis's pending-entry list. Another worker
   does not reclaim that entry until Phase 7.
+- PostgreSQL status and the Redis retry schedule cannot yet be changed atomically. If scheduling
+  fails after the database commit, the original stream entry remains unacknowledged and repeating
+  the idempotent event request can republish it. The transactional outbox in Phase 6 and pending
+  message recovery in Phase 7 close the automatic-recovery gaps.
 - A receiver can process a webhook before a worker crashes, so future recovery may deliver it again.
   Exactly-once webhook delivery is not claimed.
 
 Private-network receiver URLs are intentionally allowed for the local mock receiver. This is not a
 production-safe SSRF policy; URL resolution and network egress controls belong to Phase 9.
 
-## Next: Phase 3 (not implemented)
+## Next: Phase 4 (not implemented)
 
-Phase 3 will introduce a tested retry-policy abstraction with exponential backoff, jitter,
-retryable failure classification, timeouts, HTTP 5xx and 429 handling, `Retry-After`, and a maximum
-attempt count. Dead-letter handling remains Phase 4; signing, authentication, and the transactional
-outbox remain later phases.
+Phase 4 will add an explicit dead-letter state and manual replay while preserving all attempt
+history. Signing, authentication, and the transactional outbox remain later phases.
 

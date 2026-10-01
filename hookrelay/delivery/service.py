@@ -1,12 +1,13 @@
 import time
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hookrelay.core.config import get_settings
+from hookrelay.delivery.retry import RetryPolicy, parse_retry_after
 from hookrelay.models import Delivery, DeliveryAttempt, DeliveryStatus, Event, WebhookEndpoint
 
 
@@ -25,14 +26,22 @@ async def attempt_delivery(
     delivery: Delivery,
     event: Event,
     endpoint: WebhookEndpoint,
+    retry_policy: RetryPolicy | None = None,
 ) -> DeliveryAttempt:
     settings = get_settings()
+    policy = retry_policy or RetryPolicy(
+        max_attempts=settings.max_delivery_attempts,
+        base_delay_seconds=settings.retry_base_delay_seconds,
+        max_delay_seconds=settings.retry_max_delay_seconds,
+    )
     started_at = datetime.now(UTC)
     started_clock = time.perf_counter()
     response_status: int | None = None
     response_body_preview: str | None = None
     error_type: str | None = None
     error_message: str | None = None
+    retry_after_seconds: float | None = None
+    transport_error = False
 
     body = {
         "id": str(event.id),
@@ -46,21 +55,32 @@ async def attempt_delivery(
         response_status = response.status_code
         preview = response.content[: settings.response_body_preview_bytes]
         response_body_preview = preview.decode("utf-8", errors="replace")
-        delivery.status = (
-            DeliveryStatus.DELIVERED.value
-            if 200 <= response.status_code < 300
-            else DeliveryStatus.FAILED.value
-        )
+        retry_after_seconds = parse_retry_after(response.headers.get("Retry-After"))
     except httpx.HTTPError as exc:
-        delivery.status = DeliveryStatus.FAILED.value
+        transport_error = True
         error_type = type(exc).__name__[:100]
         error_message = str(exc)[:500]
 
     completed_at = datetime.now(UTC)
     latency_ms = max(0, round((time.perf_counter() - started_clock) * 1000))
     delivery.attempt_count += 1
-    if delivery.status == DeliveryStatus.DELIVERED.value:
+    if response_status is not None and 200 <= response_status < 300:
+        delivery.status = DeliveryStatus.DELIVERED.value
         delivery.delivered_at = completed_at
+        delivery.next_attempt_at = None
+    else:
+        decision = policy.decide(
+            attempt_number=delivery.attempt_count,
+            response_status=response_status,
+            transport_error=transport_error,
+            retry_after_seconds=retry_after_seconds,
+        )
+        if decision.should_retry and decision.delay_seconds is not None:
+            delivery.status = DeliveryStatus.RETRY_SCHEDULED.value
+            delivery.next_attempt_at = completed_at + timedelta(seconds=decision.delay_seconds)
+        else:
+            delivery.status = DeliveryStatus.FAILED.value
+            delivery.next_attempt_at = None
 
     attempt = DeliveryAttempt(
         id=uuid.uuid4(),

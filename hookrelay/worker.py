@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import socket
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from hookrelay.core.config import get_settings
 from hookrelay.db.session import async_session_factory, dispose_engine
 from hookrelay.delivery.service import attempt_delivery
 from hookrelay.models import Delivery, DeliveryStatus, Event, WebhookEndpoint
+from hookrelay.queue.redis import promote_due_retries, schedule_retry
 
 logger = logging.getLogger("hookrelay.worker")
 
@@ -64,7 +66,7 @@ async def process_message(
             )
             await acknowledge(redis, message_id)
             return
-        if delivery.status != DeliveryStatus.PENDING.value:
+        if delivery.status in {DeliveryStatus.DELIVERED.value, DeliveryStatus.FAILED.value}:
             logger.info(
                 "acknowledging duplicate message for terminal delivery",
                 extra={
@@ -73,6 +75,15 @@ async def process_message(
                     "status": delivery.status,
                 },
             )
+            await acknowledge(redis, message_id)
+            return
+
+        if (
+            delivery.status == DeliveryStatus.RETRY_SCHEDULED.value
+            and delivery.next_attempt_at is not None
+            and delivery.next_attempt_at > datetime.now(UTC)
+        ):
+            await schedule_retry(delivery.id, delivery.next_attempt_at, redis)
             await acknowledge(redis, message_id)
             return
 
@@ -87,6 +98,11 @@ async def process_message(
             return
 
         await attempt_delivery(session, http_client, delivery, event, endpoint)
+        if (
+            delivery.status == DeliveryStatus.RETRY_SCHEDULED.value
+            and delivery.next_attempt_at is not None
+        ):
+            await schedule_retry(delivery.id, delivery.next_attempt_at, redis)
         await acknowledge(redis, message_id)
         logger.info(
             "delivery processed",
@@ -96,6 +112,10 @@ async def process_message(
                 "endpoint_id": str(endpoint.id),
                 "message_id": message_id,
                 "status": delivery.status,
+                "attempt_count": delivery.attempt_count,
+                "next_attempt_at": (
+                    delivery.next_attempt_at.isoformat() if delivery.next_attempt_at else None
+                ),
             },
         )
 
@@ -118,12 +138,15 @@ async def run_worker() -> None:
             follow_redirects=False,
         ) as http_client:
             while not stop.is_set():
+                promoted = await promote_due_retries(redis)
+                if promoted:
+                    logger.info("promoted due retries", extra={"count": len(promoted)})
                 messages = await redis.xreadgroup(
                     groupname=settings.redis_consumer_group,
                     consumername=consumer_name,
                     streams={settings.redis_stream_name: ">"},
                     count=settings.worker_batch_size,
-                    block=settings.worker_block_ms,
+                    block=min(settings.worker_block_ms, settings.retry_scheduler_interval_ms),
                 )
                 for _stream, entries in messages:
                     for message_id, fields in entries:

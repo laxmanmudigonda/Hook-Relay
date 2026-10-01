@@ -29,6 +29,10 @@ class EndpointResponse(BaseModel):
     updated_at: datetime
 
 
+class EndpointUpdate(BaseModel):
+    enabled: bool
+
+
 class EventCreate(BaseModel):
     event_type: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
     payload: dict[str, Any]
@@ -42,6 +46,7 @@ class DeliverySummary(BaseModel):
     status: str
     attempt_count: int
     delivered_at: datetime | None
+    next_attempt_at: datetime | None
     created_at: datetime
 
 

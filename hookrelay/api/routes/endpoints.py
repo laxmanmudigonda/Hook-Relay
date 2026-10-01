@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hookrelay.core.config import get_settings
 from hookrelay.db.session import get_db_session
 from hookrelay.models import WebhookEndpoint
-from hookrelay.schemas import EndpointCreate, EndpointResponse
+from hookrelay.schemas import EndpointCreate, EndpointResponse, EndpointUpdate
 
 router = APIRouter(prefix="/api/v1/endpoints", tags=["endpoints"])
 
@@ -59,4 +59,24 @@ async def get_endpoint(
     )
     if endpoint is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="endpoint not found")
+    return endpoint
+
+
+@router.patch("/{endpoint_id}", response_model=EndpointResponse)
+async def update_endpoint(
+    endpoint_id: UUID,
+    request: EndpointUpdate,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> WebhookEndpoint:
+    endpoint = await session.scalar(
+        select(WebhookEndpoint).where(
+            WebhookEndpoint.id == endpoint_id,
+            WebhookEndpoint.tenant_id == get_settings().default_tenant_id,
+        )
+    )
+    if endpoint is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="endpoint not found")
+    endpoint.enabled = request.enabled
+    await session.commit()
+    await session.refresh(endpoint)
     return endpoint

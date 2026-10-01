@@ -26,6 +26,7 @@ json_type = JSON().with_variant(JSONB, "postgresql")
 
 class DeliveryStatus(StrEnum):
     PENDING = "pending"
+    RETRY_SCHEDULED = "retry_scheduled"
     DELIVERED = "delivered"
     FAILED = "failed"
 
@@ -81,8 +82,10 @@ class Delivery(Base):
         UniqueConstraint("event_id", "endpoint_id", name="uq_deliveries_event_endpoint"),
         CheckConstraint("attempt_count >= 0", name="ck_deliveries_attempt_count_nonnegative"),
         CheckConstraint(
-            "status IN ('pending', 'delivered', 'failed')", name="ck_deliveries_status"
+            "status IN ('pending', 'retry_scheduled', 'delivered', 'failed')",
+            name="ck_deliveries_status",
         ),
+        Index("ix_deliveries_retry_due", "status", "next_attempt_at"),
         Index("ix_deliveries_status_created", "status", "created_at"),
     )
 
@@ -98,6 +101,7 @@ class Delivery(Base):
     )
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

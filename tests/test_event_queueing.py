@@ -50,3 +50,20 @@ async def test_terminal_delivery_is_not_republished(monkeypatch: pytest.MonkeyPa
     await events.publish_pending_deliveries([delivery], delivery.event_id)
 
     assert published == []
+
+
+async def test_retry_scheduled_delivery_can_be_republished_for_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivery = pending_delivery()
+    delivery.status = DeliveryStatus.RETRY_SCHEDULED.value
+    published: list[uuid.UUID] = []
+
+    async def record_publish(delivery_id: uuid.UUID) -> None:
+        published.append(delivery_id)
+
+    monkeypatch.setattr(events, "publish_delivery", record_publish)
+
+    await events.publish_pending_deliveries([delivery], delivery.event_id)
+
+    assert published == [delivery.id]

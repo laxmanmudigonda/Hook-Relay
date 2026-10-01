@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from hookrelay.delivery.retry import RetryPolicy
 from hookrelay.delivery.service import attempt_delivery
 from hookrelay.models import Delivery, DeliveryStatus, Event, WebhookEndpoint
 
@@ -44,6 +45,13 @@ def delivery_objects(url: str) -> tuple[Delivery, Event, WebhookEndpoint]:
     return delivery, event, endpoint
 
 
+terminal_policy = RetryPolicy(
+    max_attempts=1,
+    base_delay_seconds=1,
+    max_delay_seconds=60,
+)
+
+
 async def test_successful_delivery_records_attempt_and_stable_envelope() -> None:
     captured: dict[str, object] = {}
 
@@ -54,7 +62,14 @@ async def test_successful_delivery_records_attempt_and_stable_envelope() -> None
     session = RecordingSession()
     delivery, event, endpoint = delivery_objects("https://receiver.example/webhook")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        attempt = await attempt_delivery(session, client, delivery, event, endpoint)  # type: ignore[arg-type]
+        attempt = await attempt_delivery(
+            session,
+            client,
+            delivery,
+            event,
+            endpoint,
+            terminal_policy,  # type: ignore[arg-type]
+        )
 
     assert captured["id"] == str(event.id)
     assert captured["type"] == "payment.completed"
@@ -74,7 +89,14 @@ async def test_http_500_records_failed_delivery() -> None:
     session = RecordingSession()
     delivery, event, endpoint = delivery_objects("https://receiver.example/fail")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        attempt = await attempt_delivery(session, client, delivery, event, endpoint)  # type: ignore[arg-type]
+        attempt = await attempt_delivery(
+            session,
+            client,
+            delivery,
+            event,
+            endpoint,
+            terminal_policy,  # type: ignore[arg-type]
+        )
 
     assert delivery.status == DeliveryStatus.FAILED.value
     assert delivery.delivered_at is None
@@ -89,9 +111,40 @@ async def test_transport_error_records_error_without_response_status() -> None:
     session = RecordingSession()
     delivery, event, endpoint = delivery_objects("https://receiver.example/unavailable")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        attempt = await attempt_delivery(session, client, delivery, event, endpoint)  # type: ignore[arg-type]
+        attempt = await attempt_delivery(
+            session,
+            client,
+            delivery,
+            event,
+            endpoint,
+            terminal_policy,  # type: ignore[arg-type]
+        )
 
     assert delivery.status == DeliveryStatus.FAILED.value
     assert attempt.response_status is None
     assert attempt.error_type == "ConnectError"
     assert attempt.error_message == "connection refused"
+
+
+async def test_retryable_failure_schedules_next_attempt() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "3"})
+
+    session = RecordingSession()
+    delivery, event, endpoint = delivery_objects("https://receiver.example/rate-limited")
+    policy = RetryPolicy(max_attempts=3, base_delay_seconds=1, max_delay_seconds=10)
+    before = datetime.now(UTC)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        attempt = await attempt_delivery(
+            session,
+            client,
+            delivery,
+            event,
+            endpoint,
+            policy,  # type: ignore[arg-type]
+        )
+
+    assert delivery.status == DeliveryStatus.RETRY_SCHEDULED.value
+    assert delivery.next_attempt_at is not None
+    assert (delivery.next_attempt_at - before).total_seconds() >= 3
+    assert attempt.response_status == 429

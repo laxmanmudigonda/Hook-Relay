@@ -20,7 +20,10 @@ router = APIRouter(prefix="/api/v1/events", tags=["events"])
 async def publish_pending_deliveries(deliveries: list[Delivery], event_id: UUID) -> None:
     try:
         for delivery in deliveries:
-            if delivery.status == DeliveryStatus.PENDING.value:
+            if delivery.status in {
+                DeliveryStatus.PENDING.value,
+                DeliveryStatus.RETRY_SCHEDULED.value,
+            }:
                 await publish_delivery(delivery.id)
     except RedisError as exc:
         raise HTTPException(

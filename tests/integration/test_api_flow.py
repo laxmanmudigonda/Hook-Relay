@@ -15,12 +15,12 @@ pytestmark = pytest.mark.skipif(
 
 
 def wait_for_terminal_delivery(client: httpx.Client, delivery_id: str) -> dict[str, object]:
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         response = client.get(f"/api/v1/deliveries/{delivery_id}")
         assert response.status_code == 200
         delivery = response.json()
-        if delivery["status"] != "pending":
+        if delivery["status"] in {"delivered", "failed"}:
             return delivery
         time.sleep(0.1)
     pytest.fail(f"delivery {delivery_id} did not reach a terminal state")
@@ -39,8 +39,13 @@ def test_asynchronous_delivery_and_idempotency() -> None:
             "/api/v1/endpoints",
             json={"url": f"{RECEIVER_BASE_URL}/webhooks/fail"},
         )
+        flaky_endpoint = client.post(
+            "/api/v1/endpoints",
+            json={"url": f"{RECEIVER_BASE_URL}/webhooks/flaky?key={key}&failures=2"},
+        )
         assert success_endpoint.status_code == 201
         assert failure_endpoint.status_code == 201
+        assert flaky_endpoint.status_code == 201
 
         request = {
             "event_type": "payment.completed",
@@ -71,10 +76,20 @@ def test_asynchronous_delivery_and_idempotency() -> None:
         deliveries_by_endpoint = {item["endpoint_id"]: item for item in first.json()["deliveries"]}
         success_delivery = deliveries_by_endpoint[success_endpoint.json()["id"]]
         failure_delivery = deliveries_by_endpoint[failure_endpoint.json()["id"]]
+        flaky_delivery = deliveries_by_endpoint[flaky_endpoint.json()["id"]]
         success_detail = wait_for_terminal_delivery(client, success_delivery["id"])
         failure_detail = wait_for_terminal_delivery(client, failure_delivery["id"])
+        flaky_detail = wait_for_terminal_delivery(client, flaky_delivery["id"])
         assert success_detail["status"] == "delivered"
         assert failure_detail["status"] == "failed"
+        assert flaky_detail["status"] == "delivered"
+        assert len(success_detail["attempts"]) == 1
+        assert len(failure_detail["attempts"]) == 5
+        assert len(flaky_detail["attempts"]) == 3
 
-        for detail in (success_detail, failure_detail):
-            assert len(detail["attempts"]) == 1
+        for endpoint in (success_endpoint, failure_endpoint, flaky_endpoint):
+            disabled = client.patch(
+                f"/api/v1/endpoints/{endpoint.json()['id']}",
+                json={"enabled": False},
+            )
+            assert disabled.status_code == 200
