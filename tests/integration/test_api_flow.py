@@ -29,6 +29,7 @@ def wait_for_terminal_delivery(client: httpx.Client, delivery_id: str) -> dict[s
 def test_asynchronous_delivery_and_idempotency() -> None:
     assert API_BASE_URL is not None
     key = f"integration-{uuid.uuid4()}"
+    signing_key = str(uuid.uuid4())
 
     with httpx.Client(base_url=API_BASE_URL, timeout=15) as client:
         success_endpoint = client.post(
@@ -47,10 +48,28 @@ def test_asynchronous_delivery_and_idempotency() -> None:
             "/api/v1/endpoints",
             json={"url": f"{RECEIVER_BASE_URL}/webhooks/flaky?key=replay-{key}&failures=5"},
         )
+        signed_endpoint = client.post(
+            "/api/v1/endpoints",
+            json={"url": f"{RECEIVER_BASE_URL}/webhooks/signed?key={signing_key}"},
+        )
         assert success_endpoint.status_code == 201
         assert failure_endpoint.status_code == 201
         assert flaky_endpoint.status_code == 201
         assert replay_endpoint.status_code == 201
+        assert signed_endpoint.status_code == 201
+        signing_secret = signed_endpoint.json()["signing_secret"]
+        assert len(signing_secret) >= 32
+
+        endpoint_detail = client.get(f"/api/v1/endpoints/{signed_endpoint.json()['id']}")
+        assert endpoint_detail.status_code == 200
+        assert "signing_secret" not in endpoint_detail.json()
+
+        with httpx.Client(base_url=RECEIVER_BASE_URL, timeout=15) as receiver_client:
+            registered = receiver_client.put(
+                f"/test/signing-secrets/{signing_key}",
+                json={"secret": signing_secret},
+            )
+        assert registered.status_code == 204
 
         request = {
             "event_type": "payment.completed",
@@ -83,18 +102,22 @@ def test_asynchronous_delivery_and_idempotency() -> None:
         failure_delivery = deliveries_by_endpoint[failure_endpoint.json()["id"]]
         flaky_delivery = deliveries_by_endpoint[flaky_endpoint.json()["id"]]
         replay_delivery = deliveries_by_endpoint[replay_endpoint.json()["id"]]
+        signed_delivery = deliveries_by_endpoint[signed_endpoint.json()["id"]]
         success_detail = wait_for_terminal_delivery(client, success_delivery["id"])
         failure_detail = wait_for_terminal_delivery(client, failure_delivery["id"])
         flaky_detail = wait_for_terminal_delivery(client, flaky_delivery["id"])
         replay_dead_letter = wait_for_terminal_delivery(client, replay_delivery["id"])
+        signed_detail = wait_for_terminal_delivery(client, signed_delivery["id"])
         assert success_detail["status"] == "delivered"
         assert failure_detail["status"] == "dead_lettered"
         assert flaky_detail["status"] == "delivered"
         assert replay_dead_letter["status"] == "dead_lettered"
+        assert signed_detail["status"] == "delivered"
         assert len(success_detail["attempts"]) == 1
         assert len(failure_detail["attempts"]) == 5
         assert len(flaky_detail["attempts"]) == 3
         assert len(replay_dead_letter["attempts"]) == 5
+        assert len(signed_detail["attempts"]) == 1
 
         replayed = client.post(f"/api/v1/deliveries/{replay_delivery['id']}/replay")
         assert replayed.status_code == 202
@@ -113,7 +136,13 @@ def test_asynchronous_delivery_and_idempotency() -> None:
         replay_again = client.post(f"/api/v1/deliveries/{replay_delivery['id']}/replay")
         assert replay_again.status_code == 409
 
-        for endpoint in (success_endpoint, failure_endpoint, flaky_endpoint, replay_endpoint):
+        for endpoint in (
+            success_endpoint,
+            failure_endpoint,
+            flaky_endpoint,
+            replay_endpoint,
+            signed_endpoint,
+        ):
             disabled = client.patch(
                 f"/api/v1/endpoints/{endpoint.json()['id']}",
                 json={"enabled": False},

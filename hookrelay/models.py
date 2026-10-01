@@ -1,3 +1,4 @@
+import secrets
 import uuid
 from datetime import datetime
 from enum import StrEnum
@@ -22,6 +23,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from hookrelay.db.base import Base
 
 json_type = JSON().with_variant(JSONB, "postgresql")
+
+
+def generate_signing_secret() -> str:
+    return secrets.token_urlsafe(32)
 
 
 class DeliveryStatus(StrEnum):
@@ -53,6 +58,7 @@ class WebhookEndpoint(Base):
     )
     url: Mapped[str] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(String(500))
+    signing_secret: Mapped[str] = mapped_column(String(255), default=generate_signing_secret)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

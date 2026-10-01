@@ -6,6 +6,7 @@ import httpx
 
 from hookrelay.delivery.retry import RetryPolicy
 from hookrelay.delivery.service import attempt_delivery
+from hookrelay.delivery.signing import verify_webhook_signature
 from hookrelay.models import Delivery, DeliveryStatus, Event, WebhookEndpoint
 
 
@@ -33,6 +34,7 @@ def delivery_objects(url: str) -> tuple[Delivery, Event, WebhookEndpoint]:
         id=uuid.uuid4(),
         tenant_id=event.tenant_id,
         url=url,
+        signing_secret="test-signing-secret-with-at-least-32-bytes",
         enabled=True,
     )
     delivery = Delivery(
@@ -59,6 +61,8 @@ async def test_successful_delivery_records_attempt_and_stable_envelope() -> None
 
     async def handler(request: httpx.Request) -> httpx.Response:
         captured.update(json.loads(request.content))
+        assert verify_webhook_signature(endpoint.signing_secret, request.headers, request.content)
+        assert request.headers["X-HookRelay-Event-ID"] == str(event.id)
         return httpx.Response(200, json={"accepted": True})
 
     session = RecordingSession()

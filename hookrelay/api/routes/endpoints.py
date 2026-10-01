@@ -8,12 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hookrelay.core.config import get_settings
 from hookrelay.db.session import get_db_session
 from hookrelay.models import WebhookEndpoint
-from hookrelay.schemas import EndpointCreate, EndpointResponse, EndpointUpdate
+from hookrelay.schemas import (
+    EndpointCreate,
+    EndpointCreatedResponse,
+    EndpointResponse,
+    EndpointUpdate,
+)
 
 router = APIRouter(prefix="/api/v1/endpoints", tags=["endpoints"])
 
 
-@router.post("", response_model=EndpointResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=EndpointCreatedResponse, status_code=status.HTTP_201_CREATED)
 async def create_endpoint(
     request: EndpointCreate,
     session: Annotated[AsyncSession, Depends(get_db_session)],

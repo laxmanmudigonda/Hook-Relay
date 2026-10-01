@@ -4,9 +4,9 @@ HookRelay is a production-oriented learning project for reliable webhook deliver
 system will accept events, persist them, and deliver them to registered HTTP endpoints while making
 failures, retries, duplicate delivery, and recovery explicit.
 
-This repository currently contains **Phase 4 dead-letter handling and manual replay**. It accepts
-and persists events, retries transient receiver failures, exposes exhausted deliveries for
-inspection, and can replay them without deleting their attempt history.
+This repository currently contains **Phase 5 signed webhook delivery**. It accepts and persists
+events, retries transient failures, supports dead-letter replay, and signs every outbound request
+so receivers can authenticate its source and detect body modification.
 
 ## Current architecture
 
@@ -78,6 +78,9 @@ curl -X POST http://localhost:8000/api/v1/events \
   -d '{"event_type":"payment.completed","payload":{"payment_id":"pay_123","amount":2499}}'
 ```
 
+The endpoint creation response contains a generated `signing_secret`. Store it securely: HookRelay
+returns it only from `POST /api/v1/endpoints`; endpoint list and detail responses never expose it.
+
 The event response may show `pending` or `retry_scheduled`. Inspect a delivery through its returned
 ID or follow worker activity:
 
@@ -143,7 +146,7 @@ docker compose exec redis redis-cli XPENDING hookrelay:deliveries hookrelay-work
 All application settings use the `HOOKRELAY_` prefix. See `.env.example`. The checked-in values are
 local-development defaults only; real credentials and `.env` files must not be committed.
 
-## Phase 4 behavior and decisions
+## Phase 5 behavior and decisions
 
 - PostgreSQL 17 is pinned by major version for reproducibility while retaining patch updates.
 - Liveness and readiness are separate because a failed dependency should remove an instance from
@@ -182,12 +185,49 @@ local-development defaults only; real credentials and `.env` files must not be c
   `replay_count` and `last_replayed_at` make the action visible.
 - Replay is restricted to dead-lettered deliveries. Replaying a pending, failed, or delivered
   delivery returns HTTP 409, as does replay to a disabled endpoint.
+- Every delivery attempt includes `X-HookRelay-Signature`, `X-HookRelay-Timestamp`, and
+  `X-HookRelay-Event-ID`. The signature is HMAC-SHA256 over the timestamp, a period, and the exact
+  request body bytes.
+- Each endpoint receives an independent, cryptographically random signing secret. It is returned
+  once during endpoint creation and omitted from later API responses.
+- Retries sign the same event envelope again with a fresh timestamp. Receivers should use the
+  stable event ID for idempotency and reject timestamps outside their allowed clock-skew window.
 
 The architectural rationale is recorded in
 [ADR 001](docs/adr/001-postgresql-as-system-of-record.md) and
 [ADR 002](docs/adr/002-redis-streams.md), and
 [ADR 003](docs/adr/003-retry-policy-and-scheduling.md), and
-[ADR 004](docs/adr/004-dead-letters-and-replay.md).
+[ADR 004](docs/adr/004-dead-letters-and-replay.md), and
+[ADR 005](docs/adr/005-webhook-signing.md).
+
+### Webhook signature contract
+
+For raw request body bytes `body` and the decimal Unix timestamp header `timestamp`, HookRelay
+computes:
+
+```text
+signed_payload = UTF8(timestamp) + "." + body
+signature = "v1=" + HEX(HMAC-SHA256(endpoint_secret, signed_payload))
+```
+
+Receivers must verify against the raw body before parsing JSON. Re-serializing JSON can change its
+bytes and invalidate a legitimate signature. The included Python verification helper uses
+constant-time comparison and a default five-minute timestamp tolerance:
+
+```python
+from hookrelay.delivery.signing import verify_webhook_signature
+
+valid = verify_webhook_signature(
+    endpoint_secret,
+    request.headers,
+    await request.body(),
+    tolerance_seconds=300,
+)
+```
+
+The mock receiver's `/webhooks/signed` route demonstrates verification. Its
+`/test/signing-secrets/{key}` setup route exists only for deterministic local integration tests and
+must not be treated as a production secret-distribution design.
 
 ### Retry configuration
 
@@ -235,9 +275,13 @@ This phase does not yet claim complete at-least-once delivery:
 Private-network receiver URLs are intentionally allowed for the local mock receiver. This is not a
 production-safe SSRF policy; URL resolution and network egress controls belong to Phase 9.
 
-## Next: Phase 5 (not implemented)
+Signing secrets are currently stored in plaintext in the local PostgreSQL database because the
+worker must retrieve them to compute HMACs. Production deployment would encrypt them with a
+KMS-backed key, tightly restrict database access, support rotation, and ensure they never appear in
+logs. Phase 5 does not claim production-grade secret management.
 
-Phase 5 will add HMAC webhook signatures, timestamp tolerance, receiver-side verification, and
-tests proving modified payloads or incorrect secrets do not verify. Authentication and the
-transactional outbox remain later phases.
+## Next: Phase 6 (not implemented)
+
+Phase 6 will add a transactional outbox so an API crash after the PostgreSQL commit cannot silently
+strand delivery work before Redis publication. Authentication remains a later phase.
 

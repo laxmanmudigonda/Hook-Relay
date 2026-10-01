@@ -29,6 +29,10 @@ class EndpointResponse(BaseModel):
     updated_at: datetime
 
 
+class EndpointCreatedResponse(EndpointResponse):
+    signing_secret: str
+
+
 class EndpointUpdate(BaseModel):
     enabled: bool
 

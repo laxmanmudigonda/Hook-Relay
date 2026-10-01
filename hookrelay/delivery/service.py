@@ -1,3 +1,4 @@
+import json
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from hookrelay.core.config import get_settings
 from hookrelay.delivery.retry import RetryPolicy, parse_retry_after
+from hookrelay.delivery.signing import build_signature_headers
 from hookrelay.models import Delivery, DeliveryAttempt, DeliveryStatus, Event, WebhookEndpoint
 
 
@@ -43,15 +45,17 @@ async def attempt_delivery(
     retry_after_seconds: float | None = None
     transport_error = False
 
-    body = {
+    envelope = {
         "id": str(event.id),
         "type": event.event_type,
         "created_at": event.created_at.isoformat(),
         "data": event.payload,
     }
+    body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = build_signature_headers(endpoint.signing_secret, str(event.id), body)
 
     try:
-        response = await client.post(endpoint.url, json=body)
+        response = await client.post(endpoint.url, content=body, headers=headers)
         response_status = response.status_code
         preview = response.content[: settings.response_body_preview_bytes]
         response_body_preview = preview.decode("utf-8", errors="replace")
