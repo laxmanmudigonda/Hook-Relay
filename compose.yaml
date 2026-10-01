@@ -1,0 +1,101 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: hookrelay
+      POSTGRES_USER: hookrelay
+      POSTGRES_PASSWORD: hookrelay
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hookrelay -d hookrelay"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - redis_data:/data
+
+  api:
+    build: .
+    environment:
+      HOOKRELAY_ENVIRONMENT: ${HOOKRELAY_ENVIRONMENT:-development}
+      HOOKRELAY_DATABASE_URL: ${HOOKRELAY_DATABASE_URL:-postgresql+asyncpg://hookrelay:hookrelay@postgres:5432/hookrelay}
+      HOOKRELAY_DATABASE_ECHO: ${HOOKRELAY_DATABASE_ECHO:-false}
+      HOOKRELAY_REDIS_URL: ${HOOKRELAY_REDIS_URL:-redis://redis:6379/0}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build: .
+    command: ["python", "-m", "hookrelay.worker"]
+    restart: unless-stopped
+    environment:
+      HOOKRELAY_ENVIRONMENT: ${HOOKRELAY_ENVIRONMENT:-development}
+      HOOKRELAY_DATABASE_URL: ${HOOKRELAY_DATABASE_URL:-postgresql+asyncpg://hookrelay:hookrelay@postgres:5432/hookrelay}
+      HOOKRELAY_DATABASE_ECHO: ${HOOKRELAY_DATABASE_ECHO:-false}
+      HOOKRELAY_REDIS_URL: ${HOOKRELAY_REDIS_URL:-redis://redis:6379/0}
+      HOOKRELAY_DELIVERY_TIMEOUT_SECONDS: ${HOOKRELAY_DELIVERY_TIMEOUT_SECONDS:-5}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-receiver:
+        condition: service_healthy
+
+  mock-receiver:
+    build: .
+    command:
+      [
+        "uvicorn",
+        "hookrelay.mock_receiver.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8001",
+      ]
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  postgres_data:
+  redis_data:
+
