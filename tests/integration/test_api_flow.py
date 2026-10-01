@@ -7,6 +7,7 @@ import pytest
 
 API_BASE_URL = os.getenv("HOOKRELAY_INTEGRATION_BASE_URL")
 RECEIVER_BASE_URL = os.getenv("HOOKRELAY_INTEGRATION_RECEIVER_URL", "http://mock-receiver:8001")
+API_KEY = os.getenv("HOOKRELAY_INTEGRATION_API_KEY", "hr_dev_local_change_me")
 
 pytestmark = pytest.mark.skipif(
     API_BASE_URL is None,
@@ -31,7 +32,11 @@ def test_asynchronous_delivery_and_idempotency() -> None:
     key = f"integration-{uuid.uuid4()}"
     signing_key = str(uuid.uuid4())
 
-    with httpx.Client(base_url=API_BASE_URL, timeout=15) as client:
+    with httpx.Client(
+        base_url=API_BASE_URL,
+        timeout=15,
+        headers={"X-API-Key": API_KEY},
+    ) as client:
         success_endpoint = client.post(
             "/api/v1/endpoints",
             json={"url": f"{RECEIVER_BASE_URL}/webhooks/success"},

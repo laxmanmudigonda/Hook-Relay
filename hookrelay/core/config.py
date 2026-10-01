@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     )
     database_echo: bool = False
     default_tenant_id: UUID = UUID("00000000-0000-0000-0000-000000000001")
+    development_api_key: str = "hr_dev_local_change_me"
     delivery_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     response_body_preview_bytes: int = Field(default=1024, ge=0, le=8192)
     redis_url: str = "redis://localhost:6379/0"

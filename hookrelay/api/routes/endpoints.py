@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hookrelay.core.config import get_settings
+from hookrelay.api.auth import CurrentTenant
 from hookrelay.db.session import get_db_session
 from hookrelay.models import WebhookEndpoint
 from hookrelay.schemas import (
@@ -22,9 +22,10 @@ router = APIRouter(prefix="/api/v1/endpoints", tags=["endpoints"])
 async def create_endpoint(
     request: EndpointCreate,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
 ) -> WebhookEndpoint:
     endpoint = WebhookEndpoint(
-        tenant_id=get_settings().default_tenant_id,
+        tenant_id=tenant.id,
         url=str(request.url),
         description=request.description,
         enabled=request.enabled,
@@ -38,12 +39,13 @@ async def create_endpoint(
 @router.get("", response_model=list[EndpointResponse])
 async def list_endpoints(
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[WebhookEndpoint]:
     result = await session.scalars(
         select(WebhookEndpoint)
-        .where(WebhookEndpoint.tenant_id == get_settings().default_tenant_id)
+        .where(WebhookEndpoint.tenant_id == tenant.id)
         .order_by(WebhookEndpoint.created_at.desc(), WebhookEndpoint.id)
         .limit(limit)
         .offset(offset)
@@ -55,11 +57,12 @@ async def list_endpoints(
 async def get_endpoint(
     endpoint_id: UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
 ) -> WebhookEndpoint:
     endpoint = await session.scalar(
         select(WebhookEndpoint).where(
             WebhookEndpoint.id == endpoint_id,
-            WebhookEndpoint.tenant_id == get_settings().default_tenant_id,
+            WebhookEndpoint.tenant_id == tenant.id,
         )
     )
     if endpoint is None:
@@ -72,11 +75,12 @@ async def update_endpoint(
     endpoint_id: UUID,
     request: EndpointUpdate,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
 ) -> WebhookEndpoint:
     endpoint = await session.scalar(
         select(WebhookEndpoint).where(
             WebhookEndpoint.id == endpoint_id,
-            WebhookEndpoint.tenant_id == get_settings().default_tenant_id,
+            WebhookEndpoint.tenant_id == tenant.id,
         )
     )
     if endpoint is None:

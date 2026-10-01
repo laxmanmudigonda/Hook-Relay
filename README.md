@@ -4,7 +4,7 @@ HookRelay is a production-oriented learning project for reliable webhook deliver
 system will accept events, persist them, and deliver them to registered HTTP endpoints while making
 failures, retries, duplicate delivery, and recovery explicit.
 
-This repository currently contains **Phase 7 crash-safe worker recovery**. It accepts and persists
+This repository currently contains **Phase 8 multi-tenant API authentication**. It accepts and persists
 events, retries transient failures, supports dead-letter replay, signs every outbound request, and
 uses a PostgreSQL outbox plus recoverable worker leases so committed or abandoned work is not lost.
 
@@ -70,10 +70,12 @@ Register a successful receiver and submit an event:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/endpoints \
+  -H "X-API-Key: hr_dev_local_change_me" \
   -H "Content-Type: application/json" \
   -d '{"url":"http://mock-receiver:8001/webhooks/success","description":"Local demo"}'
 
 curl -X POST http://localhost:8000/api/v1/events \
+  -H "X-API-Key: hr_dev_local_change_me" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: demo-payment-1" \
   -d '{"event_type":"payment.completed","payload":{"payment_id":"pay_123","amount":2499}}'
@@ -86,14 +88,16 @@ The event response may show `pending` or `retry_scheduled`. Inspect a delivery t
 ID or follow worker activity:
 
 ```bash
-curl http://localhost:8000/api/v1/deliveries/DELIVERY_ID
+curl -H "X-API-Key: hr_dev_local_change_me" \
+  http://localhost:8000/api/v1/deliveries/DELIVERY_ID
 docker compose logs -f worker
 ```
 
 After a retryable failure exhausts its attempt budget, replay it once the receiver is healthy:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/deliveries/DELIVERY_ID/replay
+curl -X POST http://localhost:8000/api/v1/deliveries/DELIVERY_ID/replay \
+  -H "X-API-Key: hr_dev_local_change_me"
 ```
 
 Replay returns HTTP 202, resets the current retry-cycle count, and queues the same delivery ID.
@@ -147,13 +151,14 @@ docker compose exec redis redis-cli XPENDING hookrelay:deliveries hookrelay-work
 All application settings use the `HOOKRELAY_` prefix. See `.env.example`. The checked-in values are
 local-development defaults only; real credentials and `.env` files must not be committed.
 
-## Phase 7 behavior and decisions
+## Phase 8 behavior and decisions
 
 - PostgreSQL 17 is pinned by major version for reproducibility while retaining patch updates.
 - Liveness and readiness are separate because a failed dependency should remove an instance from
   traffic without falsely claiming that its process is dead.
-- A seeded development tenant is used until API-key authentication arrives in Phase 8. Every API
-  query is still tenant-scoped so that boundary is explicit in the code.
+- Every `/api/v1` request requires `X-API-Key`. Its SHA-256 digest resolves the tenant and every
+  resource lookup is tenant-scoped; health and readiness probes intentionally remain public.
+- The checked-in development key is only for the local Compose stack. Raw keys are never stored.
 - An event currently fans out to every enabled endpoint. Event subscriptions are not needed for the
   current MVP and have not been invented prematurely.
 - `Idempotency-Key` is unique per tenant. Repeating a key returns the original event and does not
@@ -205,7 +210,8 @@ The architectural rationale is recorded in
 [ADR 004](docs/adr/004-dead-letters-and-replay.md), and
 [ADR 005](docs/adr/005-webhook-signing.md), and
 [ADR 006](docs/adr/006-transactional-outbox.md), and
-[ADR 007](docs/adr/007-worker-recovery-and-leases.md).
+[ADR 007](docs/adr/007-worker-recovery-and-leases.md), and
+[ADR 008](docs/adr/008-api-key-authentication.md).
 
 ### Webhook signature contract
 
@@ -280,8 +286,8 @@ worker must retrieve them to compute HMACs. Production deployment would encrypt 
 KMS-backed key, tightly restrict database access, support rotation, and ensure they never appear in
 logs. Phase 5 does not claim production-grade secret management.
 
-## Next: Phase 8 (not implemented)
+## Next: Phase 9 (not implemented)
 
-Phase 8 will replace the seeded development tenant boundary with API-key authentication and
-explicit multi-tenant request scoping.
+Phase 9 will add per-tenant rate limiting, request-size limits, production-safe receiver URL
+validation, and stronger secret-handling controls.
 

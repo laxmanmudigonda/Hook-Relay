@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hookrelay.core.config import get_settings
+from hookrelay.api.auth import CurrentTenant
 from hookrelay.db.session import get_db_session
 from hookrelay.models import Delivery, DeliveryStatus, Event, WebhookEndpoint
 from hookrelay.outbox import add_delivery_outbox
@@ -51,11 +51,12 @@ async def create_event(
     request: EventCreate,
     response: Response,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
     idempotency_key: Annotated[
         str | None, Header(alias="Idempotency-Key", min_length=1, max_length=255)
     ] = None,
 ) -> EventResponse:
-    tenant_id = get_settings().default_tenant_id
+    tenant_id = tenant.id
 
     if idempotency_key is not None:
         event_id = uuid.uuid4()
@@ -133,11 +134,12 @@ async def create_event(
 async def get_event(
     event_id: UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
 ) -> EventResponse:
     event = await session.scalar(
         select(Event).where(
             Event.id == event_id,
-            Event.tenant_id == get_settings().default_tenant_id,
+            Event.tenant_id == tenant.id,
         )
     )
     if event is None:

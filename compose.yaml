@@ -31,6 +31,7 @@ services:
       HOOKRELAY_DATABASE_URL: ${HOOKRELAY_DATABASE_URL:-postgresql+asyncpg://hookrelay:hookrelay@postgres:5432/hookrelay}
       HOOKRELAY_DATABASE_ECHO: ${HOOKRELAY_DATABASE_ECHO:-false}
       HOOKRELAY_REDIS_URL: ${HOOKRELAY_REDIS_URL:-redis://redis:6379/0}
+      HOOKRELAY_DEVELOPMENT_API_KEY: ${HOOKRELAY_DEVELOPMENT_API_KEY:-hr_dev_local_change_me}
     ports:
       - "8000:8000"
     depends_on:

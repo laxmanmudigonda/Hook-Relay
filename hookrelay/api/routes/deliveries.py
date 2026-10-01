@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hookrelay.core.config import get_settings
+from hookrelay.api.auth import CurrentTenant
 from hookrelay.db.session import get_db_session
 from hookrelay.models import Delivery, DeliveryAttempt, DeliveryStatus, Event, WebhookEndpoint
 from hookrelay.outbox import add_delivery_outbox
@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api/v1/deliveries", tags=["deliveries"])
 async def owned_delivery(
     session: AsyncSession,
     delivery_id: UUID,
+    tenant_id: UUID,
     *,
     for_update: bool = False,
 ) -> Delivery | None:
@@ -26,7 +27,7 @@ async def owned_delivery(
         .join(Event, Event.id == Delivery.event_id)
         .where(
             Delivery.id == delivery_id,
-            Event.tenant_id == get_settings().default_tenant_id,
+            Event.tenant_id == tenant_id,
         )
     )
     if for_update:
@@ -52,8 +53,9 @@ async def delivery_response(session: AsyncSession, delivery: Delivery) -> Delive
 async def get_delivery(
     delivery_id: UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
 ) -> DeliveryResponse:
-    delivery = await owned_delivery(session, delivery_id)
+    delivery = await owned_delivery(session, delivery_id, tenant.id)
     if delivery is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="delivery not found")
     return await delivery_response(session, delivery)
@@ -63,8 +65,9 @@ async def get_delivery(
 async def list_attempts(
     delivery_id: UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
 ) -> list[DeliveryAttempt]:
-    if await owned_delivery(session, delivery_id) is None:
+    if await owned_delivery(session, delivery_id, tenant.id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="delivery not found")
     return list(
         await session.scalars(
@@ -83,8 +86,9 @@ async def list_attempts(
 async def replay_delivery(
     delivery_id: UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant: CurrentTenant,
 ) -> DeliveryResponse:
-    delivery = await owned_delivery(session, delivery_id, for_update=True)
+    delivery = await owned_delivery(session, delivery_id, tenant.id, for_update=True)
     if delivery is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="delivery not found")
     if delivery.status != DeliveryStatus.DEAD_LETTERED.value:
