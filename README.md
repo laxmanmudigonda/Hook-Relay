@@ -4,9 +4,9 @@ HookRelay is a production-oriented learning project for reliable webhook deliver
 system will accept events, persist them, and deliver them to registered HTTP endpoints while making
 failures, retries, duplicate delivery, and recovery explicit.
 
-This repository currently contains **Phase 5 signed webhook delivery**. It accepts and persists
-events, retries transient failures, supports dead-letter replay, and signs every outbound request
-so receivers can authenticate its source and detect body modification.
+This repository currently contains **Phase 6 transactional publication**. It accepts and persists
+events, retries transient failures, supports dead-letter replay, signs every outbound request, and
+uses a PostgreSQL outbox so committed delivery work is not lost during a Redis outage.
 
 ## Current architecture
 
@@ -16,9 +16,10 @@ HTTP client
     v
 FastAPI (endpoints, events, deliveries)
     |
-    +----> PostgreSQL (system of record)
-    |
-    +----> Redis Stream <---- due retries from Redis sorted set
+    +----> PostgreSQL (events + deliveries + outbox, one transaction)
+                    |
+                    v
+             Outbox publisher ----> Redis Stream <---- due retries
               |
               v
         Delivery worker ----> HTTP POST ----> Mock receiver
@@ -146,7 +147,7 @@ docker compose exec redis redis-cli XPENDING hookrelay:deliveries hookrelay-work
 All application settings use the `HOOKRELAY_` prefix. See `.env.example`. The checked-in values are
 local-development defaults only; real credentials and `.env` files must not be committed.
 
-## Phase 5 behavior and decisions
+## Phase 6 behavior and decisions
 
 - PostgreSQL 17 is pinned by major version for reproducibility while retaining patch updates.
 - Liveness and readiness are separate because a failed dependency should remove an instance from
@@ -170,11 +171,12 @@ local-development defaults only; real credentials and `.env` files must not be c
 - PostgreSQL is authoritative for status, attempt count, history, and `next_attempt_at`. A Redis
   sorted set is the efficient due-time schedule. A Lua script atomically removes due IDs from that
   set and appends them to the delivery stream.
-- The API commits the event and pending deliveries before publishing their IDs. The worker commits
-  attempt state before acknowledging Redis entries.
-- Repeating an idempotent request republishes incomplete pending or retry-scheduled deliveries.
-  This provides an explicit recovery action when Redis publication or retry scheduling failed,
-  while terminal deliveries are not sent again.
+- The API commits an event, its deliveries, and corresponding outbox rows atomically. It never
+  publishes directly to Redis, so Redis downtime cannot create a commit/publish gap.
+- A dedicated publisher locks unpublished outbox rows with `FOR UPDATE SKIP LOCKED`, appends each
+  delivery ID to Redis, and marks the row published. Multiple publishers can safely share work.
+- Repeating an idempotent request creates fresh outbox rows only for incomplete pending or
+  retry-scheduled deliveries; terminal deliveries are not sent again.
 - Duplicate stream entries are expected. A worker acknowledges entries for terminal deliveries
   without issuing another HTTP request.
 - A retryable failure that exhausts its configured attempts becomes `dead_lettered`. A
@@ -198,7 +200,8 @@ The architectural rationale is recorded in
 [ADR 002](docs/adr/002-redis-streams.md), and
 [ADR 003](docs/adr/003-retry-policy-and-scheduling.md), and
 [ADR 004](docs/adr/004-dead-letters-and-replay.md), and
-[ADR 005](docs/adr/005-webhook-signing.md).
+[ADR 005](docs/adr/005-webhook-signing.md), and
+[ADR 006](docs/adr/006-transactional-outbox.md).
 
 ### Webhook signature contract
 
@@ -258,17 +261,12 @@ All six attempt records remain available through the delivery and attempts APIs.
 
 This phase does not yet claim complete at-least-once delivery:
 
-- A crash after the PostgreSQL commit but before Redis publication can strand pending work. An
-  idempotent client retry republishes it, while Phase 6 will close the gap with an outbox.
 - A worker crash after reading a message can leave it in Redis's pending-entry list. Another worker
   does not reclaim that entry until Phase 7.
-- PostgreSQL status and the Redis retry schedule cannot yet be changed atomically. If scheduling
-  fails after the database commit, the original stream entry remains unacknowledged and repeating
-  the idempotent event request can republish it. The transactional outbox in Phase 6 and pending
-  message recovery in Phase 7 close the automatic-recovery gaps.
-- The replay state commit and Redis publication are also not atomic yet. If replay publication
-  fails, the delivery remains `pending`; repeating the original idempotent event request can
-  republish it. Phase 6 will move this publication through the transactional outbox.
+- Retry scheduling still uses Redis directly. If scheduling fails after the database commit, the
+  original stream entry remains unacknowledged for Phase 7 recovery.
+- The publisher is intentionally at-least-once: a crash after `XADD` but before marking the outbox
+  row published can create a duplicate stream entry. Workers therefore must remain idempotent.
 - A receiver can process a webhook before a worker crashes, so future recovery may deliver it again.
   Exactly-once webhook delivery is not claimed.
 
@@ -280,8 +278,8 @@ worker must retrieve them to compute HMACs. Production deployment would encrypt 
 KMS-backed key, tightly restrict database access, support rotation, and ensure they never appear in
 logs. Phase 5 does not claim production-grade secret management.
 
-## Next: Phase 6 (not implemented)
+## Next: Phase 7 (not implemented)
 
-Phase 6 will add a transactional outbox so an API crash after the PostgreSQL commit cannot silently
-strand delivery work before Redis publication. Authentication remains a later phase.
+Phase 7 will reclaim abandoned Redis pending entries, protect concurrent duplicate processing,
+and verify graceful worker shutdown and crash recovery. Authentication remains a later phase.
 

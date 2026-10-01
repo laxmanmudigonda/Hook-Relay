@@ -3,14 +3,13 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hookrelay.core.config import get_settings
 from hookrelay.db.session import get_db_session
 from hookrelay.models import Delivery, DeliveryAttempt, DeliveryStatus, Event, WebhookEndpoint
-from hookrelay.queue.redis import publish_delivery
+from hookrelay.outbox import add_delivery_outbox
 from hookrelay.schemas import DeliveryAttemptResponse, DeliveryResponse
 
 router = APIRouter(prefix="/api/v1/deliveries", tags=["deliveries"])
@@ -112,18 +111,7 @@ async def replay_delivery(
     delivery.next_attempt_at = None
     delivery.delivered_at = None
     delivery.last_replayed_at = datetime.now(UTC)
+    add_delivery_outbox(session, [delivery])
     await session.commit()
     await session.refresh(delivery)
-
-    try:
-        await publish_delivery(delivery.id)
-    except RedisError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "message": "replay persisted but delivery queue is unavailable",
-                "delivery_id": str(delivery.id),
-            },
-        ) from exc
-
     return await delivery_response(session, delivery)

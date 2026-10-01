@@ -3,7 +3,6 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
-from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,28 +10,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hookrelay.core.config import get_settings
 from hookrelay.db.session import get_db_session
 from hookrelay.models import Delivery, DeliveryStatus, Event, WebhookEndpoint
-from hookrelay.queue.redis import publish_delivery
+from hookrelay.outbox import add_delivery_outbox
 from hookrelay.schemas import DeliverySummary, EventCreate, EventResponse
 
 router = APIRouter(prefix="/api/v1/events", tags=["events"])
 
 
-async def publish_pending_deliveries(deliveries: list[Delivery], event_id: UUID) -> None:
-    try:
-        for delivery in deliveries:
-            if delivery.status in {
-                DeliveryStatus.PENDING.value,
-                DeliveryStatus.RETRY_SCHEDULED.value,
-            }:
-                await publish_delivery(delivery.id)
-    except RedisError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "message": "event persisted but delivery queue is unavailable",
-                "event_id": str(event_id),
-            },
-        ) from exc
+def enqueue_incomplete_deliveries(session: AsyncSession, deliveries: list[Delivery]) -> None:
+    add_delivery_outbox(
+        session,
+        (
+            delivery
+            for delivery in deliveries
+            if delivery.status
+            in {DeliveryStatus.PENDING.value, DeliveryStatus.RETRY_SCHEDULED.value}
+        ),
+    )
 
 
 async def event_response(session: AsyncSession, event: Event) -> EventResponse:
@@ -98,7 +91,8 @@ async def create_event(
             existing_deliveries = list(
                 await session.scalars(select(Delivery).where(Delivery.event_id == existing.id))
             )
-            await publish_pending_deliveries(existing_deliveries, existing.id)
+            enqueue_incomplete_deliveries(session, existing_deliveries)
+            await session.commit()
             response.status_code = status.HTTP_200_OK
             return await event_response(session, existing)
         event = await session.get(Event, inserted_id)
@@ -128,10 +122,9 @@ async def create_event(
         for endpoint in endpoints
     ]
     session.add_all(deliveries)
+    add_delivery_outbox(session, deliveries)
     await session.commit()
     await session.refresh(event)
-
-    await publish_pending_deliveries(deliveries, event.id)
 
     return await event_response(session, event)
 

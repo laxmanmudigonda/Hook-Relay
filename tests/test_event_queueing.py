@@ -1,69 +1,47 @@
 import uuid
 
-import pytest
-from fastapi import HTTPException
-from redis.exceptions import ConnectionError as RedisConnectionError
-
-from hookrelay.api.routes import events
-from hookrelay.models import Delivery, DeliveryStatus
+from hookrelay.api.routes.events import enqueue_incomplete_deliveries
+from hookrelay.models import Delivery, DeliveryStatus, OutboxEvent
 
 
-def pending_delivery() -> Delivery:
+class RecordingSession:
+    def __init__(self) -> None:
+        self.added: list[object] = []
+
+    def add_all(self, items: list[object]) -> None:
+        self.added.extend(items)
+
+
+def delivery(status: DeliveryStatus) -> Delivery:
     return Delivery(
         id=uuid.uuid4(),
         event_id=uuid.uuid4(),
         endpoint_id=uuid.uuid4(),
-        status=DeliveryStatus.PENDING.value,
+        status=status.value,
         attempt_count=0,
+        current_attempt_count=0,
+        replay_count=0,
     )
 
 
-async def test_queue_failure_reports_persisted_event(monkeypatch: pytest.MonkeyPatch) -> None:
-    delivery = pending_delivery()
-    event_id = delivery.event_id
+def test_pending_and_retry_scheduled_deliveries_create_outbox_rows() -> None:
+    session = RecordingSession()
+    pending = delivery(DeliveryStatus.PENDING)
+    retry = delivery(DeliveryStatus.RETRY_SCHEDULED)
 
-    async def fail_publish(_delivery_id: uuid.UUID) -> None:
-        raise RedisConnectionError("redis unavailable")
+    enqueue_incomplete_deliveries(session, [pending, retry])  # type: ignore[arg-type]
 
-    monkeypatch.setattr(events, "publish_delivery", fail_publish)
-
-    with pytest.raises(HTTPException) as raised:
-        await events.publish_pending_deliveries([delivery], event_id)
-
-    assert raised.value.status_code == 503
-    assert raised.value.detail == {
-        "message": "event persisted but delivery queue is unavailable",
-        "event_id": str(event_id),
-    }
+    rows = [item for item in session.added if isinstance(item, OutboxEvent)]
+    assert len(rows) == 2
+    assert {item.aggregate_id for item in rows} == {pending.id, retry.id}
 
 
-async def test_terminal_delivery_is_not_republished(monkeypatch: pytest.MonkeyPatch) -> None:
-    delivery = pending_delivery()
-    delivery.status = DeliveryStatus.DELIVERED.value
-    published: list[uuid.UUID] = []
+def test_terminal_deliveries_do_not_create_outbox_rows() -> None:
+    session = RecordingSession()
 
-    async def record_publish(delivery_id: uuid.UUID) -> None:
-        published.append(delivery_id)
+    enqueue_incomplete_deliveries(
+        session,  # type: ignore[arg-type]
+        [delivery(DeliveryStatus.DELIVERED), delivery(DeliveryStatus.DEAD_LETTERED)],
+    )
 
-    monkeypatch.setattr(events, "publish_delivery", record_publish)
-
-    await events.publish_pending_deliveries([delivery], delivery.event_id)
-
-    assert published == []
-
-
-async def test_retry_scheduled_delivery_can_be_republished_for_recovery(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    delivery = pending_delivery()
-    delivery.status = DeliveryStatus.RETRY_SCHEDULED.value
-    published: list[uuid.UUID] = []
-
-    async def record_publish(delivery_id: uuid.UUID) -> None:
-        published.append(delivery_id)
-
-    monkeypatch.setattr(events, "publish_delivery", record_publish)
-
-    await events.publish_pending_deliveries([delivery], delivery.event_id)
-
-    assert published == [delivery.id]
+    assert session.added == []

@@ -75,6 +75,22 @@ services:
       mock-receiver:
         condition: service_healthy
 
+  publisher:
+    build: .
+    command: ["python", "-m", "hookrelay.publisher"]
+    restart: unless-stopped
+    environment:
+      HOOKRELAY_ENVIRONMENT: ${HOOKRELAY_ENVIRONMENT:-development}
+      HOOKRELAY_DATABASE_URL: ${HOOKRELAY_DATABASE_URL:-postgresql+asyncpg://hookrelay:hookrelay@postgres:5432/hookrelay}
+      HOOKRELAY_REDIS_URL: ${HOOKRELAY_REDIS_URL:-redis://redis:6379/0}
+      HOOKRELAY_OUTBOX_POLL_INTERVAL_MS: ${HOOKRELAY_OUTBOX_POLL_INTERVAL_MS:-500}
+      HOOKRELAY_OUTBOX_BATCH_SIZE: ${HOOKRELAY_OUTBOX_BATCH_SIZE:-100}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   mock-receiver:
     build: .
     command:

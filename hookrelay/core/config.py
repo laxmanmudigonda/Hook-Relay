@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     retry_schedule_name: str = "hookrelay:retries"
     retry_scheduler_interval_ms: int = Field(default=500, ge=100, le=60000)
     retry_promotion_batch_size: int = Field(default=100, ge=1, le=1000)
+    outbox_poll_interval_ms: int = Field(default=500, ge=50, le=60000)
+    outbox_batch_size: int = Field(default=100, ge=1, le=1000)
 
 
 @lru_cache
