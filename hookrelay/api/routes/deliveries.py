@@ -109,6 +109,7 @@ async def replay_delivery(
     delivery.current_attempt_count = 0
     delivery.replay_count += 1
     delivery.next_attempt_at = None
+    delivery.processing_started_at = None
     delivery.delivered_at = None
     delivery.last_replayed_at = datetime.now(UTC)
     add_delivery_outbox(session, [delivery])

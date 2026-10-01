@@ -1,7 +1,12 @@
 import uuid
 from datetime import UTC, datetime
 
-from hookrelay.queue.redis import promote_due_retries, publish_delivery, schedule_retry
+from hookrelay.queue.redis import (
+    promote_due_retries,
+    publish_delivery,
+    reclaim_abandoned,
+    schedule_retry,
+)
 
 
 class RecordingRedis:
@@ -9,6 +14,7 @@ class RecordingRedis:
         self.calls: list[tuple[str, dict[str, str]]] = []
         self.zadd_calls: list[tuple[str, dict[str, float]]] = []
         self.eval_calls: list[tuple[object, ...]] = []
+        self.xautoclaim_calls: list[tuple[object, ...]] = []
 
     async def xadd(self, stream: str, fields: dict[str, str]) -> str:
         self.calls.append((stream, fields))
@@ -21,6 +27,10 @@ class RecordingRedis:
     async def eval(self, *args: object) -> list[str]:
         self.eval_calls.append(args)
         return ["delivery-1"]
+
+    async def xautoclaim(self, *args: object, **kwargs: object) -> list[object]:
+        self.xautoclaim_calls.append((*args, kwargs))
+        return ["0-0", [("9-0", {"delivery_id": "delivery-9"})], []]
 
 
 async def test_publish_delivery_uses_stable_identifier() -> None:
@@ -57,3 +67,16 @@ async def test_promote_due_retries_calls_atomic_script() -> None:
         "hookrelay:deliveries",
     )
     assert redis.eval_calls[0][4] == now.timestamp()
+
+
+async def test_reclaim_abandoned_uses_consumer_group_claim() -> None:
+    redis = RecordingRedis()
+
+    reclaimed = await reclaim_abandoned("worker-2", redis)  # type: ignore[arg-type]
+
+    assert reclaimed == [("9-0", {"delivery_id": "delivery-9"})]
+    assert redis.xautoclaim_calls[0][:3] == (
+        "hookrelay:deliveries",
+        "hookrelay-workers",
+        "worker-2",
+    )

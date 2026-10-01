@@ -31,6 +31,7 @@ def generate_signing_secret() -> str:
 
 class DeliveryStatus(StrEnum):
     PENDING = "pending"
+    PROCESSING = "processing"
     RETRY_SCHEDULED = "retry_scheduled"
     DELIVERED = "delivered"
     FAILED = "failed"
@@ -94,7 +95,8 @@ class Delivery(Base):
         ),
         CheckConstraint("replay_count >= 0", name="ck_deliveries_replay_count_nonnegative"),
         CheckConstraint(
-            "status IN ('pending', 'retry_scheduled', 'delivered', 'failed', 'dead_lettered')",
+            "status IN ('pending', 'processing', 'retry_scheduled', 'delivered', 'failed', "
+            "'dead_lettered')",
             name="ck_deliveries_status",
         ),
         Index("ix_deliveries_retry_due", "status", "next_attempt_at"),
@@ -117,6 +119,7 @@ class Delivery(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_replayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

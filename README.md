@@ -4,9 +4,9 @@ HookRelay is a production-oriented learning project for reliable webhook deliver
 system will accept events, persist them, and deliver them to registered HTTP endpoints while making
 failures, retries, duplicate delivery, and recovery explicit.
 
-This repository currently contains **Phase 6 transactional publication**. It accepts and persists
+This repository currently contains **Phase 7 crash-safe worker recovery**. It accepts and persists
 events, retries transient failures, supports dead-letter replay, signs every outbound request, and
-uses a PostgreSQL outbox so committed delivery work is not lost during a Redis outage.
+uses a PostgreSQL outbox plus recoverable worker leases so committed or abandoned work is not lost.
 
 ## Current architecture
 
@@ -147,7 +147,7 @@ docker compose exec redis redis-cli XPENDING hookrelay:deliveries hookrelay-work
 All application settings use the `HOOKRELAY_` prefix. See `.env.example`. The checked-in values are
 local-development defaults only; real credentials and `.env` files must not be committed.
 
-## Phase 6 behavior and decisions
+## Phase 7 behavior and decisions
 
 - PostgreSQL 17 is pinned by major version for reproducibility while retaining patch updates.
 - Liveness and readiness are separate because a failed dependency should remove an instance from
@@ -179,6 +179,9 @@ local-development defaults only; real credentials and `.env` files must not be c
   retry-scheduled deliveries; terminal deliveries are not sent again.
 - Duplicate stream entries are expected. A worker acknowledges entries for terminal deliveries
   without issuing another HTTP request.
+- Workers reclaim idle consumer-group entries with `XAUTOCLAIM`. An atomic PostgreSQL processing
+  lease prevents concurrently published duplicates from issuing simultaneous requests, while a
+  stale lease can be taken over after the configured idle threshold.
 - A retryable failure that exhausts its configured attempts becomes `dead_lettered`. A
   non-retryable response such as HTTP 400 becomes `failed` immediately and is not treated as retry
   exhaustion.
@@ -201,7 +204,8 @@ The architectural rationale is recorded in
 [ADR 003](docs/adr/003-retry-policy-and-scheduling.md), and
 [ADR 004](docs/adr/004-dead-letters-and-replay.md), and
 [ADR 005](docs/adr/005-webhook-signing.md), and
-[ADR 006](docs/adr/006-transactional-outbox.md).
+[ADR 006](docs/adr/006-transactional-outbox.md), and
+[ADR 007](docs/adr/007-worker-recovery-and-leases.md).
 
 ### Webhook signature contract
 
@@ -259,12 +263,10 @@ All six attempt records remain available through the delivery and attempts APIs.
 
 ### Current delivery semantics and limitations
 
-This phase does not yet claim complete at-least-once delivery:
+HookRelay provides at-least-once delivery, with these intentional limitations:
 
-- A worker crash after reading a message can leave it in Redis's pending-entry list. Another worker
-  does not reclaim that entry until Phase 7.
 - Retry scheduling still uses Redis directly. If scheduling fails after the database commit, the
-  original stream entry remains unacknowledged for Phase 7 recovery.
+  original stream entry remains unacknowledged and is recovered through `XAUTOCLAIM`.
 - The publisher is intentionally at-least-once: a crash after `XADD` but before marking the outbox
   row published can create a duplicate stream entry. Workers therefore must remain idempotent.
 - A receiver can process a webhook before a worker crashes, so future recovery may deliver it again.
@@ -278,8 +280,8 @@ worker must retrieve them to compute HMACs. Production deployment would encrypt 
 KMS-backed key, tightly restrict database access, support rotation, and ensure they never appear in
 logs. Phase 5 does not claim production-grade secret management.
 
-## Next: Phase 7 (not implemented)
+## Next: Phase 8 (not implemented)
 
-Phase 7 will reclaim abandoned Redis pending entries, protect concurrent duplicate processing,
-and verify graceful worker shutdown and crash recovery. Authentication remains a later phase.
+Phase 8 will replace the seeded development tenant boundary with API-key authentication and
+explicit multi-tenant request scoping.
 

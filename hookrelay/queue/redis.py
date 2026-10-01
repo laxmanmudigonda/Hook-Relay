@@ -61,5 +61,21 @@ async def promote_due_retries(
     return [str(delivery_id) for delivery_id in result]
 
 
+async def reclaim_abandoned(
+    consumer_name: str,
+    client: Redis | None = None,
+) -> list[tuple[str, dict[str, str]]]:
+    active_client = client or redis_client
+    result = await active_client.xautoclaim(
+        settings.redis_stream_name,
+        settings.redis_consumer_group,
+        consumer_name,
+        min_idle_time=settings.worker_claim_idle_ms,
+        start_id="0-0",
+        count=settings.worker_batch_size,
+    )
+    return list(result[1])
+
+
 async def close_redis() -> None:
     await redis_client.aclose()

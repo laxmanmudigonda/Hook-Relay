@@ -3,19 +3,21 @@ import logging
 import os
 import signal
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import httpx
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
+from sqlalchemy import and_, or_, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from hookrelay.core.config import get_settings
 from hookrelay.db.session import async_session_factory, dispose_engine
 from hookrelay.delivery.service import attempt_delivery
 from hookrelay.models import Delivery, DeliveryStatus, Event, WebhookEndpoint
-from hookrelay.queue.redis import promote_due_retries, schedule_retry
+from hookrelay.queue.redis import promote_due_retries, reclaim_abandoned, schedule_retry
 
 logger = logging.getLogger("hookrelay.worker")
 
@@ -43,6 +45,43 @@ async def acknowledge(client: Redis, message_id: str) -> None:
     )
 
 
+async def claim_delivery(session: AsyncSession, delivery_id: UUID) -> Delivery | None:
+    """Atomically acquire work or take over a stale processing lease."""
+    settings = get_settings()
+    now = datetime.now(UTC)
+    stale_before = now - timedelta(milliseconds=settings.worker_claim_idle_ms)
+    claimed_id = await session.scalar(
+        update(Delivery)
+        .where(
+            Delivery.id == delivery_id,
+            or_(
+                Delivery.status == DeliveryStatus.PENDING.value,
+                and_(
+                    Delivery.status == DeliveryStatus.RETRY_SCHEDULED.value,
+                    Delivery.next_attempt_at.is_not(None),
+                    Delivery.next_attempt_at <= now,
+                ),
+                and_(
+                    Delivery.status == DeliveryStatus.PROCESSING.value,
+                    Delivery.processing_started_at.is_not(None),
+                    Delivery.processing_started_at <= stale_before,
+                ),
+            ),
+        )
+        .values(
+            status=DeliveryStatus.PROCESSING.value,
+            processing_started_at=now,
+            next_attempt_at=None,
+        )
+        .returning(Delivery.id)
+    )
+    if claimed_id is None:
+        await session.rollback()
+        return None
+    await session.commit()
+    return await session.get(Delivery, claimed_id)
+
+
 async def process_message(
     redis: Redis,
     http_client: httpx.AsyncClient,
@@ -58,36 +97,19 @@ async def process_message(
         return
 
     async with async_session_factory() as session:
-        delivery = await session.get(Delivery, delivery_id)
+        delivery = await claim_delivery(session, delivery_id)
         if delivery is None:
-            logger.warning(
-                "acknowledging message for missing delivery",
+            existing = await session.get(Delivery, delivery_id)
+            if (
+                existing is not None
+                and existing.status == DeliveryStatus.RETRY_SCHEDULED.value
+                and existing.next_attempt_at is not None
+            ):
+                await schedule_retry(existing.id, existing.next_attempt_at, redis)
+            logger.info(
+                "acknowledging message that is terminal, scheduled, or already processing",
                 extra={"delivery_id": str(delivery_id), "message_id": message_id},
             )
-            await acknowledge(redis, message_id)
-            return
-        if delivery.status in {
-            DeliveryStatus.DELIVERED.value,
-            DeliveryStatus.FAILED.value,
-            DeliveryStatus.DEAD_LETTERED.value,
-        }:
-            logger.info(
-                "acknowledging duplicate message for terminal delivery",
-                extra={
-                    "delivery_id": str(delivery.id),
-                    "message_id": message_id,
-                    "status": delivery.status,
-                },
-            )
-            await acknowledge(redis, message_id)
-            return
-
-        if (
-            delivery.status == DeliveryStatus.RETRY_SCHEDULED.value
-            and delivery.next_attempt_at is not None
-            and delivery.next_attempt_at > datetime.now(UTC)
-        ):
-            await schedule_retry(delivery.id, delivery.next_attempt_at, redis)
             await acknowledge(redis, message_id)
             return
 
@@ -142,10 +164,25 @@ async def run_worker() -> None:
             timeout=settings.delivery_timeout_seconds,
             follow_redirects=False,
         ) as http_client:
+            last_claim_at = 0.0
             while not stop.is_set():
                 promoted = await promote_due_retries(redis)
                 if promoted:
                     logger.info("promoted due retries", extra={"count": len(promoted)})
+                now = loop.time()
+                if now - last_claim_at >= settings.worker_claim_interval_ms / 1000:
+                    reclaimed = await reclaim_abandoned(consumer_name, redis)
+                    last_claim_at = now
+                    if reclaimed:
+                        logger.info("reclaimed abandoned messages", extra={"count": len(reclaimed)})
+                    for message_id, fields in reclaimed:
+                        try:
+                            await process_message(redis, http_client, message_id, fields)
+                        except Exception:
+                            logger.exception(
+                                "reclaimed delivery processing failed before acknowledgement",
+                                extra={"message_id": message_id},
+                            )
                 messages = await redis.xreadgroup(
                     groupname=settings.redis_consumer_group,
                     consumername=consumer_name,

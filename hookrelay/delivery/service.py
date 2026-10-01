@@ -69,6 +69,7 @@ async def attempt_delivery(
     latency_ms = max(0, round((time.perf_counter() - started_clock) * 1000))
     delivery.attempt_count += 1
     delivery.current_attempt_count += 1
+    delivery.processing_started_at = None
     if response_status is not None and 200 <= response_status < 300:
         delivery.status = DeliveryStatus.DELIVERED.value
         delivery.delivered_at = completed_at

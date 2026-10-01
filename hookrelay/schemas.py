@@ -54,6 +54,7 @@ class DeliverySummary(BaseModel):
     delivered_at: datetime | None
     next_attempt_at: datetime | None
     last_replayed_at: datetime | None
+    processing_started_at: datetime | None
     created_at: datetime
 
 

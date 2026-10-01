@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     redis_consumer_group: str = "hookrelay-workers"
     worker_block_ms: int = Field(default=5000, ge=100, le=60000)
     worker_batch_size: int = Field(default=10, ge=1, le=100)
+    worker_claim_idle_ms: int = Field(default=30000, ge=1000, le=3600000)
+    worker_claim_interval_ms: int = Field(default=5000, ge=100, le=60000)
     max_delivery_attempts: int = Field(default=5, ge=1, le=100)
     retry_base_delay_seconds: float = Field(default=1.0, gt=0, le=3600)
     retry_max_delay_seconds: float = Field(default=60.0, gt=0, le=86400)
