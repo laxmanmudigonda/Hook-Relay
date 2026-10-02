@@ -4,7 +4,7 @@ HookRelay is a production-oriented learning project for reliable webhook deliver
 system will accept events, persist them, and deliver them to registered HTTP endpoints while making
 failures, retries, duplicate delivery, and recovery explicit.
 
-This repository currently contains **Phase 8 multi-tenant API authentication**. It accepts and persists
+This repository currently contains **Phase 9 security hardening**. It accepts and persists
 events, retries transient failures, supports dead-letter replay, signs every outbound request, and
 uses a PostgreSQL outbox plus recoverable worker leases so committed or abandoned work is not lost.
 
@@ -151,7 +151,7 @@ docker compose exec redis redis-cli XPENDING hookrelay:deliveries hookrelay-work
 All application settings use the `HOOKRELAY_` prefix. See `.env.example`. The checked-in values are
 local-development defaults only; real credentials and `.env` files must not be committed.
 
-## Phase 8 behavior and decisions
+## Phase 9 behavior and decisions
 
 - PostgreSQL 17 is pinned by major version for reproducibility while retaining patch updates.
 - Liveness and readiness are separate because a failed dependency should remove an instance from
@@ -159,6 +159,11 @@ local-development defaults only; real credentials and `.env` files must not be c
 - Every `/api/v1` request requires `X-API-Key`. Its SHA-256 digest resolves the tenant and every
   resource lookup is tenant-scoped; health and readiness probes intentionally remain public.
 - The checked-in development key is only for the local Compose stack. Raw keys are never stored.
+- Redis atomically enforces a configurable per-tenant request limit. API bodies are rejected before
+  parsing when they exceed the configured one-megabyte default.
+- Receiver hostnames are resolved and non-public addresses are rejected unless the explicit local
+  development override is enabled. HTTP redirects remain disabled.
+- New signing secrets are encrypted at rest and returned in plaintext only at endpoint creation.
 - An event currently fans out to every enabled endpoint. Event subscriptions are not needed for the
   current MVP and have not been invented prematurely.
 - `Idempotency-Key` is unique per tenant. Repeating a key returns the original event and does not
@@ -211,7 +216,8 @@ The architectural rationale is recorded in
 [ADR 005](docs/adr/005-webhook-signing.md), and
 [ADR 006](docs/adr/006-transactional-outbox.md), and
 [ADR 007](docs/adr/007-worker-recovery-and-leases.md), and
-[ADR 008](docs/adr/008-api-key-authentication.md).
+[ADR 008](docs/adr/008-api-key-authentication.md), and
+[ADR 009](docs/adr/009-api-security-boundaries.md).
 
 ### Webhook signature contract
 
@@ -278,16 +284,13 @@ HookRelay provides at-least-once delivery, with these intentional limitations:
 - A receiver can process a webhook before a worker crashes, so future recovery may deliver it again.
   Exactly-once webhook delivery is not claimed.
 
-Private-network receiver URLs are intentionally allowed for the local mock receiver. This is not a
-production-safe SSRF policy; URL resolution and network egress controls belong to Phase 9.
+Private-network receiver URLs are enabled only by the local Compose override. Production still
+requires an egress firewall and connection-time DNS/IP enforcement to fully address DNS rebinding.
+The local encryption key is intentionally non-secret; production must inject and rotate a managed
+secret without committing it.
 
-Signing secrets are currently stored in plaintext in the local PostgreSQL database because the
-worker must retrieve them to compute HMACs. Production deployment would encrypt them with a
-KMS-backed key, tightly restrict database access, support rotation, and ensure they never appear in
-logs. Phase 5 does not claim production-grade secret management.
+## Next: Phase 10 (not implemented)
 
-## Next: Phase 9 (not implemented)
-
-Phase 9 will add per-tenant rate limiting, request-size limits, production-safe receiver URL
-validation, and stronger secret-handling controls.
+Phase 10 will add structured JSON logs, Prometheus metrics, request correlation, and documented
+alerting guidance. Distributed tracing will be included only where it adds actionable value.
 

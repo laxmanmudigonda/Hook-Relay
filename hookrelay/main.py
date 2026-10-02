@@ -1,8 +1,9 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from hookrelay.api.rate_limit import enforce_rate_limit
 from hookrelay.api.routes.deliveries import router as deliveries_router
 from hookrelay.api.routes.endpoints import router as endpoints_router
 from hookrelay.api.routes.events import router as events_router
@@ -10,6 +11,7 @@ from hookrelay.api.routes.health import router as health_router
 from hookrelay.core.config import get_settings
 from hookrelay.db.session import dispose_engine
 from hookrelay.queue.redis import close_redis
+from hookrelay.security import RequestSizeLimitMiddleware
 
 
 @asynccontextmanager
@@ -26,10 +28,15 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    application.add_middleware(
+        RequestSizeLimitMiddleware,
+        max_bytes=settings.max_request_body_bytes,
+    )
     application.include_router(health_router)
-    application.include_router(endpoints_router)
-    application.include_router(events_router)
-    application.include_router(deliveries_router)
+    protected = [Depends(enforce_rate_limit)]
+    application.include_router(endpoints_router, dependencies=protected)
+    application.include_router(events_router, dependencies=protected)
+    application.include_router(deliveries_router, dependencies=protected)
     return application
 
 

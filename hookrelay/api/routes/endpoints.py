@@ -7,13 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from hookrelay.api.auth import CurrentTenant
 from hookrelay.db.session import get_db_session
-from hookrelay.models import WebhookEndpoint
+from hookrelay.models import WebhookEndpoint, generate_signing_secret
 from hookrelay.schemas import (
     EndpointCreate,
     EndpointCreatedResponse,
     EndpointResponse,
     EndpointUpdate,
 )
+from hookrelay.security import encrypt_signing_secret, validate_endpoint_url
 
 router = APIRouter(prefix="/api/v1/endpoints", tags=["endpoints"])
 
@@ -23,17 +24,29 @@ async def create_endpoint(
     request: EndpointCreate,
     session: Annotated[AsyncSession, Depends(get_db_session)],
     tenant: CurrentTenant,
-) -> WebhookEndpoint:
+) -> EndpointCreatedResponse:
+    try:
+        await validate_endpoint_url(str(request.url))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    signing_secret = generate_signing_secret()
     endpoint = WebhookEndpoint(
         tenant_id=tenant.id,
         url=str(request.url),
         description=request.description,
         enabled=request.enabled,
+        signing_secret=encrypt_signing_secret(signing_secret),
     )
     session.add(endpoint)
     await session.commit()
     await session.refresh(endpoint)
-    return endpoint
+    return EndpointCreatedResponse(
+        **EndpointResponse.model_validate(endpoint).model_dump(),
+        signing_secret=signing_secret,
+    )
 
 
 @router.get("", response_model=list[EndpointResponse])

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     database_echo: bool = False
     default_tenant_id: UUID = UUID("00000000-0000-0000-0000-000000000001")
     development_api_key: str = "hr_dev_local_change_me"
+    signing_encryption_key: str = "local-development-encryption-key-change-me"
+    allow_private_endpoint_urls: bool = False
+    max_request_body_bytes: int = Field(default=1048576, ge=1024, le=10485760)
+    rate_limit_requests_per_minute: int = Field(default=120, ge=1, le=100000)
     delivery_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     response_body_preview_bytes: int = Field(default=1024, ge=0, le=8192)
     redis_url: str = "redis://localhost:6379/0"

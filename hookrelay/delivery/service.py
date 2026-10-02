@@ -11,6 +11,7 @@ from hookrelay.core.config import get_settings
 from hookrelay.delivery.retry import RetryPolicy, parse_retry_after
 from hookrelay.delivery.signing import build_signature_headers
 from hookrelay.models import Delivery, DeliveryAttempt, DeliveryStatus, Event, WebhookEndpoint
+from hookrelay.security import decrypt_signing_secret
 
 
 async def get_http_client() -> AsyncIterator[httpx.AsyncClient]:
@@ -52,7 +53,11 @@ async def attempt_delivery(
         "data": event.payload,
     }
     body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    headers = build_signature_headers(endpoint.signing_secret, str(event.id), body)
+    headers = build_signature_headers(
+        decrypt_signing_secret(endpoint.signing_secret),
+        str(event.id),
+        body,
+    )
 
     try:
         response = await client.post(endpoint.url, content=body, headers=headers)
