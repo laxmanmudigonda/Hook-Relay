@@ -4,12 +4,16 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 
 from hookrelay.api.rate_limit import enforce_rate_limit
+from hookrelay.api.routes.dashboard import router as dashboard_router
+from hookrelay.api.routes.dashboard import ui_router
 from hookrelay.api.routes.deliveries import router as deliveries_router
 from hookrelay.api.routes.endpoints import router as endpoints_router
 from hookrelay.api.routes.events import router as events_router
 from hookrelay.api.routes.health import router as health_router
 from hookrelay.core.config import get_settings
 from hookrelay.db.session import dispose_engine
+from hookrelay.observability import configure_logging, observe_request
+from hookrelay.observability import router as observability_router
 from hookrelay.queue.redis import close_redis
 from hookrelay.security import RequestSizeLimitMiddleware
 
@@ -22,6 +26,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     settings = get_settings()
     application = FastAPI(
         title=settings.app_name,
@@ -32,11 +37,15 @@ def create_app() -> FastAPI:
         RequestSizeLimitMiddleware,
         max_bytes=settings.max_request_body_bytes,
     )
+    application.middleware("http")(observe_request)
     application.include_router(health_router)
+    application.include_router(observability_router)
+    application.include_router(ui_router)
     protected = [Depends(enforce_rate_limit)]
     application.include_router(endpoints_router, dependencies=protected)
     application.include_router(events_router, dependencies=protected)
     application.include_router(deliveries_router, dependencies=protected)
+    application.include_router(dashboard_router, dependencies=protected)
     return application
 
 

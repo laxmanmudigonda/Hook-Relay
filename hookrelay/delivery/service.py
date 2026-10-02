@@ -11,6 +11,7 @@ from hookrelay.core.config import get_settings
 from hookrelay.delivery.retry import RetryPolicy, parse_retry_after
 from hookrelay.delivery.signing import build_signature_headers
 from hookrelay.models import Delivery, DeliveryAttempt, DeliveryStatus, Event, WebhookEndpoint
+from hookrelay.observability import DELIVERY_ATTEMPTS, DELIVERY_DURATION
 from hookrelay.security import decrypt_signing_secret
 
 
@@ -111,4 +112,7 @@ async def attempt_delivery(
     )
     session.add(attempt)
     await session.commit()
+    result = delivery.status
+    DELIVERY_ATTEMPTS.labels(result).inc()
+    DELIVERY_DURATION.labels(result).observe(latency_ms / 1000)
     return attempt

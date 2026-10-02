@@ -3,11 +3,13 @@ import logging
 import signal
 from datetime import UTC, datetime
 
+from prometheus_client import start_http_server
 from sqlalchemy import select
 
 from hookrelay.core.config import get_settings
 from hookrelay.db.session import async_session_factory, dispose_engine
 from hookrelay.models import OutboxEvent
+from hookrelay.observability import OUTBOX_PUBLICATIONS, configure_logging
 from hookrelay.queue.redis import close_redis, publish_delivery
 
 logger = logging.getLogger("hookrelay.publisher")
@@ -30,11 +32,13 @@ async def publish_batch() -> int:
                 try:
                     await publish_delivery(row.aggregate_id)
                 except Exception as exc:
+                    OUTBOX_PUBLICATIONS.labels("failed").inc()
                     row.publish_attempts += 1
                     row.last_error = f"{type(exc).__name__}: {exc}"[:500]
                     logger.exception("outbox publication failed", extra={"outbox_id": str(row.id)})
                     continue
                 row.publish_attempts += 1
+                OUTBOX_PUBLICATIONS.labels("published").inc()
                 row.last_error = None
                 row.published_at = datetime.now(UTC)
             return len(rows)
@@ -64,10 +68,8 @@ async def run_publisher() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
+    start_http_server(get_settings().publisher_metrics_port)
     asyncio.run(run_publisher())
 
 

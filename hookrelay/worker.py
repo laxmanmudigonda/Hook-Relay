@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import httpx
+from prometheus_client import start_http_server
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 from sqlalchemy import and_, or_, update
@@ -17,6 +18,7 @@ from hookrelay.core.config import get_settings
 from hookrelay.db.session import async_session_factory, dispose_engine
 from hookrelay.delivery.service import attempt_delivery
 from hookrelay.models import Delivery, DeliveryStatus, Event, WebhookEndpoint
+from hookrelay.observability import RECLAIMED_MESSAGES, configure_logging
 from hookrelay.queue.redis import promote_due_retries, reclaim_abandoned, schedule_retry
 
 logger = logging.getLogger("hookrelay.worker")
@@ -174,6 +176,7 @@ async def run_worker() -> None:
                     reclaimed = await reclaim_abandoned(consumer_name, redis)
                     last_claim_at = now
                     if reclaimed:
+                        RECLAIMED_MESSAGES.inc(len(reclaimed))
                         logger.info("reclaimed abandoned messages", extra={"count": len(reclaimed)})
                     for message_id, fields in reclaimed:
                         try:
@@ -206,10 +209,8 @@ async def run_worker() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
+    start_http_server(get_settings().worker_metrics_port)
     asyncio.run(run_worker())
 
 

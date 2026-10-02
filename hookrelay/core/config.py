@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     allow_private_endpoint_urls: bool = False
     max_request_body_bytes: int = Field(default=1048576, ge=1024, le=10485760)
     rate_limit_requests_per_minute: int = Field(default=120, ge=1, le=100000)
+    worker_metrics_port: int = Field(default=9000, ge=1024, le=65535)
+    publisher_metrics_port: int = Field(default=9001, ge=1024, le=65535)
     delivery_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     response_body_preview_bytes: int = Field(default=1024, ge=0, le=8192)
     redis_url: str = "redis://localhost:6379/0"

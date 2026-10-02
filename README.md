@@ -4,7 +4,7 @@ HookRelay is a production-oriented learning project for reliable webhook deliver
 system will accept events, persist them, and deliver them to registered HTTP endpoints while making
 failures, retries, duplicate delivery, and recovery explicit.
 
-This repository currently contains **Phase 9 security hardening**. It accepts and persists
+This repository contains the completed **Phases 1–13 portfolio build**. It accepts and persists
 events, retries transient failures, supports dead-letter replay, signs every outbound request, and
 uses a PostgreSQL outbox plus recoverable worker leases so committed or abandoned work is not lost.
 
@@ -64,6 +64,8 @@ docker compose ps
 ```
 
 Interactive API documentation is available at <http://localhost:8000/docs>.
+The developer dashboard is available at <http://localhost:8000/dashboard>; enter the local API key
+`hr_dev_local_change_me` to view tenant-scoped delivery counts and recent activity.
 The mock receiver is available at <http://localhost:8001/docs>.
 
 Register a successful receiver and submit an event:
@@ -151,7 +153,7 @@ docker compose exec redis redis-cli XPENDING hookrelay:deliveries hookrelay-work
 All application settings use the `HOOKRELAY_` prefix. See `.env.example`. The checked-in values are
 local-development defaults only; real credentials and `.env` files must not be committed.
 
-## Phase 9 behavior and decisions
+## Completed behavior and decisions
 
 - PostgreSQL 17 is pinned by major version for reproducibility while retaining patch updates.
 - Liveness and readiness are separate because a failed dependency should remove an instance from
@@ -218,6 +220,10 @@ The architectural rationale is recorded in
 [ADR 007](docs/adr/007-worker-recovery-and-leases.md), and
 [ADR 008](docs/adr/008-api-key-authentication.md), and
 [ADR 009](docs/adr/009-api-security-boundaries.md).
+
+Operational guidance is in [operations.md](docs/operations.md), the system diagram is in
+[architecture.md](docs/architecture.md), the measured local baseline is in
+[performance.md](docs/performance.md), and [demo.md](docs/demo.md) provides a five-minute walkthrough.
 
 ### Webhook signature contract
 
@@ -289,8 +295,15 @@ requires an egress firewall and connection-time DNS/IP enforcement to fully addr
 The local encryption key is intentionally non-secret; production must inject and rotate a managed
 secret without committing it.
 
-## Next: Phase 10 (not implemented)
+### Performance probe
 
-Phase 10 will add structured JSON logs, Prometheus metrics, request correlation, and documented
-alerting guidance. Distributed tracing will be included only where it adds actionable value.
+Run the reproducible concurrent probe against the active stack:
+
+```bash
+python scripts/load_test.py --requests 100 --concurrency 10
+```
+
+The script reports actual throughput, p50/p95 API latency, and status counts; it never contains
+invented benchmark numbers. Raise the configured local rate limit when intentionally testing above
+120 requests per minute.
 

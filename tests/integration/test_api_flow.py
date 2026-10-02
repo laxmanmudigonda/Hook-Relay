@@ -23,7 +23,7 @@ def wait_for_terminal_delivery(client: httpx.Client, delivery_id: str) -> dict[s
         delivery = response.json()
         if delivery["status"] in {"delivered", "failed", "dead_lettered"}:
             return delivery
-        time.sleep(0.1)
+        time.sleep(0.5)
     pytest.fail(f"delivery {delivery_id} did not reach a terminal state")
 
 
